@@ -1,0 +1,299 @@
+/**
+ * 元数据建模字段体系 —— 前后端共享
+ * 覆盖五元组、会话流统计、TCP 状态、DNS、HTTP、HTTPS/TLS、
+ * 时间周期、地理情报、应用内容、关联聚合共 10 大类 170+ 字段。
+ */
+
+export type FieldType =
+  | "string"
+  | "number"
+  | "ip"
+  | "port"
+  | "time"
+  | "enum"
+  | "boolean"
+  | "ratio";
+
+export interface FieldDef {
+  key: string;
+  label: string;
+  type: FieldType;
+  unit?: string;
+  desc: string;
+  example?: string;
+}
+
+export interface FieldCategory {
+  code: string;
+  label: string;
+  en: string;
+  desc: string;
+  fields: FieldDef[];
+}
+
+export const FIELD_CATEGORIES: FieldCategory[] = [
+  {
+    code: "five_tuple",
+    label: "五元组与链路",
+    en: "5-TUPLE & LINK",
+    desc: "会话标识与网络链路基础信息，是关联分析的最小锚点",
+    fields: [
+      { key: "sessionId", label: "会话 ID", type: "string", desc: "全局唯一会话标识，由五元组+时间哈希生成", example: "S-20260918-000341" },
+      { key: "srcIp", label: "源 IP", type: "ip", desc: "会话发起方 IP 地址", example: "10.12.3.45" },
+      { key: "srcPort", label: "源端口", type: "port", desc: "会话发起方 TCP/UDP 端口", example: "52413" },
+      { key: "dstIp", label: "目的 IP", type: "ip", desc: "会话接收方 IP 地址", example: "203.0.113.66" },
+      { key: "dstPort", label: "目的端口", type: "port", desc: "会话接收方服务端口", example: "443" },
+      { key: "protocol", label: "传输层协议", type: "enum", desc: "TCP / UDP / ICMP 等传输层协议", example: "TCP" },
+      { key: "ipVersion", label: "IP 版本", type: "enum", desc: "IPv4 或 IPv6", example: "IPv4" },
+      { key: "vlanId", label: "VLAN ID", type: "number", desc: "会话所属虚拟局域网标识", example: "120" },
+      { key: "ingressIf", label: "入接口", type: "string", desc: "流量进入采集点的网络接口", example: "eth0" },
+      { key: "egressIf", label: "出接口", type: "string", desc: "流量离开采集点的网络接口", example: "eth1" },
+      { key: "direction", label: "会话方向", type: "enum", desc: "内到外 / 外到内 / 内到内", example: "内到外" },
+      { key: "srcMac", label: "源 MAC", type: "string", desc: "发起方物理地址（内网可见）", example: "00:1A:2B:3C:4D:5E" },
+      { key: "dstMac", label: "目的 MAC", type: "string", desc: "接收方物理地址（内网可见）", example: "00:5E:4D:3C:2B:1A" },
+      { key: "sensorId", label: "采集探针", type: "string", desc: "上报该会话元数据的探针节点", example: "sensor-core-01" },
+    ],
+  },
+  {
+    code: "flow_stats",
+    label: "会话流统计",
+    en: "FLOW STATISTICS",
+    desc: "上下行包数、字节数、速率与包长分布等流量行为量化特征",
+    fields: [
+      { key: "startTime", label: "会话开始时间", type: "time", desc: "首个报文观测时间", example: "2026-09-18 03:12:44" },
+      { key: "endTime", label: "会话结束时间", type: "time", desc: "最后一个报文观测时间", example: "2026-09-18 03:13:02" },
+      { key: "duration", label: "会话时长", type: "number", unit: "ms", desc: "会话持续毫秒数", example: "18000" },
+      { key: "upPackets", label: "上行数据包数", type: "number", unit: "个", desc: "源到目的方向的报文总数", example: "126" },
+      { key: "downPackets", label: "下行数据包数", type: "number", unit: "个", desc: "目的到源方向的报文总数", example: "98" },
+      { key: "totalPackets", label: "总包数", type: "number", unit: "个", desc: "双向报文合计", example: "224" },
+      { key: "upBytes", label: "上行字节数", type: "number", unit: "B", desc: "源到目的方向载荷字节总量", example: "15360" },
+      { key: "downBytes", label: "下行字节数", type: "number", unit: "B", desc: "目的到源方向载荷字节总量", example: "1048576" },
+      { key: "totalBytes", label: "总字节数", type: "number", unit: "B", desc: "双向字节合计", example: "1063936" },
+      { key: "upDownByteRatio", label: "上下行字节比", type: "ratio", desc: "上行字节 / 下行字节，外泄行为的重要信号", example: "12.4" },
+      { key: "upPacketRate", label: "上行包速率", type: "number", unit: "pps", desc: "上行方向每秒报文数", example: "7.0" },
+      { key: "downPacketRate", label: "下行包速率", type: "number", unit: "pps", desc: "下行方向每秒报文数", example: "5.4" },
+      { key: "upByteRate", label: "上行字节速率", type: "number", unit: "B/s", desc: "上行方向每秒字节数", example: "853" },
+      { key: "downByteRate", label: "下行字节速率", type: "number", unit: "B/s", desc: "下行方向每秒字节数", example: "58254" },
+      { key: "avgPktLenUp", label: "上行平均包长", type: "number", unit: "B", desc: "上行报文平均长度", example: "122" },
+      { key: "avgPktLenDown", label: "下行平均包长", type: "number", unit: "B", desc: "下行报文平均长度", example: "1068" },
+      { key: "maxPktLenUp", label: "上行最大包长", type: "number", unit: "B", desc: "上行方向最大单包长度", example: "1460" },
+      { key: "minPktLenUp", label: "上行最小包长", type: "number", unit: "B", desc: "上行方向最小单包长度", example: "54" },
+      { key: "pktLenStdUp", label: "上行包长标准差", type: "number", unit: "B", desc: "上行包长离散程度，心跳流量该值极低", example: "8.2" },
+      { key: "pktLenStdDown", label: "下行包长标准差", type: "number", unit: "B", desc: "下行包长离散程度", example: "412.6" },
+      { key: "smallPktRatio", label: "小包占比", type: "ratio", desc: "长度 < 128B 报文占比，扫描/心跳特征", example: "0.86" },
+      { key: "retransCount", label: "重传报文数", type: "number", unit: "个", desc: "TCP 重传报文计数", example: "3" },
+      { key: "retransRatio", label: "重传率", type: "ratio", desc: "重传报文占总报文比例", example: "0.013" },
+      { key: "outOfOrderCount", label: "乱序报文数", type: "number", unit: "个", desc: "到达顺序异常的报文数", example: "1" },
+      { key: "fragCount", label: "分片报文数", type: "number", unit: "个", desc: "IP 分片报文计数", example: "0" },
+      { key: "payloadEntropyUp", label: "上行载荷熵", type: "number", unit: "bit", desc: "上行载荷香农熵，加密/隧道流量偏高", example: "7.6" },
+      { key: "payloadEntropyDown", label: "下行载荷熵", type: "number", unit: "bit", desc: "下行载荷香农熵", example: "7.9" },
+      { key: "idleTimeTotal", label: "空闲时长合计", type: "number", unit: "ms", desc: "会话内无报文的累计时长", example: "4200" },
+    ],
+  },
+  {
+    code: "tcp",
+    label: "TCP 标志与状态",
+    en: "TCP FLAGS & STATE",
+    desc: "TCP 标志位计数、握手质量与会话关闭方式，刻画连接健康度",
+    fields: [
+      { key: "synCount", label: "SYN 次数", type: "number", unit: "次", desc: "SYN 标志报文计数", example: "1" },
+      { key: "synAckCount", label: "SYN-ACK 次数", type: "number", unit: "次", desc: "SYN+ACK 标志报文计数", example: "1" },
+      { key: "ackCount", label: "ACK 次数", type: "number", unit: "次", desc: "ACK 标志报文计数", example: "180" },
+      { key: "finCount", label: "FIN 次数", type: "number", unit: "次", desc: "FIN 标志报文计数", example: "2" },
+      { key: "rstCount", label: "RST 次数", type: "number", unit: "次", desc: "RST 标志报文计数，扫描与爆破特征", example: "1" },
+      { key: "pshCount", label: "PSH 次数", type: "number", unit: "次", desc: "PSH 标志报文计数", example: "64" },
+      { key: "urgCount", label: "URG 次数", type: "number", unit: "次", desc: "URG 标志报文计数", example: "0" },
+      { key: "handshakeRtt", label: "握手 RTT", type: "number", unit: "ms", desc: "三次握手往返时延", example: "32" },
+      { key: "handshakeSuccess", label: "握手是否成功", type: "boolean", desc: "三次握手是否完整建立", example: "true" },
+      { key: "closeReason", label: "关闭方式", type: "enum", desc: "正常 FIN / RST 中断 / 超时", example: "FIN" },
+      { key: "tcpState", label: "会话终态", type: "enum", desc: "ESTABLISHED / CLOSED / RESET / TIMEOUT", example: "CLOSED" },
+      { key: "initWinSize", label: "初始窗口大小", type: "number", unit: "B", desc: "发起方初始 TCP 窗口", example: "64240" },
+      { key: "winScale", label: "窗口缩放因子", type: "number", desc: "TCP Window Scale 选项值", example: "8" },
+      { key: "mss", label: "MSS", type: "number", unit: "B", desc: "最大报文段长度协商值", example: "1460" },
+      { key: "ttlInit", label: "初始 TTL", type: "number", desc: "首包 TTL 推断值，可辅助操作系统识别", example: "64" },
+      { key: "zeroWinCount", label: "零窗口次数", type: "number", unit: "次", desc: "零窗口通告次数，反映接收端拥塞", example: "0" },
+    ],
+  },
+  {
+    code: "dns",
+    label: "DNS 协议",
+    en: "DNS PROTOCOL",
+    desc: "域名查询全要素：查询名、类型、应答、熵值与解析行为统计",
+    fields: [
+      { key: "dnsQueryName", label: "查询域名", type: "string", desc: "DNS 查询的完整域名（FQDN）", example: "www.example.com" },
+      { key: "dnsQueryType", label: "查询类型", type: "enum", desc: "A / AAAA / TXT / CNAME / MX 等", example: "A" },
+      { key: "dnsRcode", label: "响应码", type: "enum", desc: "NOERROR / NXDOMAIN / SERVFAIL 等", example: "NOERROR" },
+      { key: "dnsAnswerCount", label: "应答记录数", type: "number", unit: "条", desc: "响应中资源记录数量", example: "4" },
+      { key: "dnsAnswerIps", label: "解析结果 IP", type: "string", desc: "应答中的 IP 列表", example: "93.184.216.34" },
+      { key: "dnsTtl", label: "应答 TTL", type: "number", unit: "s", desc: "DNS 应答生存时间，C2 常用短 TTL", example: "300" },
+      { key: "dnsQueryLen", label: "查询名长度", type: "number", unit: "字符", desc: "FQDN 字符长度，隧道域名显著偏长", example: "15" },
+      { key: "dnsSubdomainLen", label: "子域名长度", type: "number", unit: "字符", desc: "最长子域标签长度", example: "8" },
+      { key: "dnsNameEntropy", label: "域名香农熵", type: "number", unit: "bit", desc: "域名字符熵，DGA/隧道域名偏高", example: "3.1" },
+      { key: "dnsDigitRatio", label: "数字字符占比", type: "ratio", desc: "域名中数字字符比例", example: "0.05" },
+      { key: "dnsIsNxdomain", label: "是否 NXDOMAIN", type: "boolean", desc: "该查询是否返回域名不存在", example: "false" },
+      { key: "dnsNxdomainRatio", label: "主机 NXDOMAIN 率", type: "ratio", desc: "同一源 IP 的 NXDOMAIN 应答占比，DGA 核心指标", example: "0.72" },
+      { key: "dnsQpsHost", label: "主机 DNS QPS", type: "number", unit: "qps", desc: "源主机域名查询速率", example: "0.4" },
+      { key: "dnsUniqueDomains", label: "主机独立域名数", type: "number", unit: "个", desc: "统计窗口内源主机查询的不同域名数", example: "182" },
+      { key: "dnsTxtCount", label: "TXT 查询次数", type: "number", unit: "次", desc: "TXT 类型查询计数，DNS 隧道常用", example: "46" },
+      { key: "dnsLongQueryCount", label: "超长查询次数", type: "number", unit: "次", desc: "查询名 > 52 字符的查询计数", example: "38" },
+      { key: "dnsServerIp", label: "DNS 服务器", type: "ip", desc: "应答该查询的 DNS 服务器", example: "10.12.0.2" },
+      { key: "dnsResponseSize", label: "响应报文大小", type: "number", unit: "B", desc: "DNS 响应报文字节数", example: "412" },
+      { key: "dnsIsDoH", label: "是否 DoH", type: "boolean", desc: "是否 DNS over HTTPS 加密查询", example: "false" },
+      { key: "dnsEdns", label: "EDNS 支持", type: "boolean", desc: "是否携带 EDNS0 扩展", example: "true" },
+      { key: "dnsRtt", label: "DNS 解析时延", type: "number", unit: "ms", desc: "查询到应答的时延", example: "18" },
+      { key: "dnsTld", label: "顶级域", type: "string", desc: "域名顶级后缀", example: ".com" },
+    ],
+  },
+  {
+    code: "http",
+    label: "HTTP 协议",
+    en: "HTTP PROTOCOL",
+    desc: "HTTP 请求/响应要素与攻击载荷特征",
+    fields: [
+      { key: "httpMethod", label: "请求方法", type: "enum", desc: "GET / POST / PUT 等", example: "GET" },
+      { key: "httpHost", label: "Host 头", type: "string", desc: "HTTP Host 头部值", example: "cdn.example.com" },
+      { key: "httpUri", label: "请求 URI", type: "string", desc: "请求资源路径", example: "/api/v1/login" },
+      { key: "httpUriLen", label: "URI 长度", type: "number", unit: "字符", desc: "URI 字符长度，注入攻击常偏长", example: "24" },
+      { key: "httpUserAgent", label: "User-Agent", type: "string", desc: "客户端标识字符串", example: "Mozilla/5.0 ..." },
+      { key: "httpStatus", label: "响应状态码", type: "number", desc: "HTTP 响应状态码", example: "200" },
+      { key: "httpContentType", label: "Content-Type", type: "string", desc: "响应内容类型", example: "text/html" },
+      { key: "httpContentLen", label: "内容长度", type: "number", unit: "B", desc: "响应体字节数", example: "20480" },
+      { key: "httpReferer", label: "Referer", type: "string", desc: "来源页面地址", example: "https://example.com/" },
+      { key: "httpCookieCount", label: "Cookie 个数", type: "number", unit: "个", desc: "请求携带的 Cookie 数量", example: "3" },
+      { key: "httpHasSqlPattern", label: "含 SQL 注入特征", type: "boolean", desc: "URI/参数是否匹配 SQL 注入模式", example: "false" },
+      { key: "httpHasXssPattern", label: "含 XSS 特征", type: "boolean", desc: "URI/参数是否匹配跨站脚本模式", example: "false" },
+      { key: "httpHasPathTraversal", label: "含路径穿越特征", type: "boolean", desc: "URI 是否包含 ../ 等穿越序列", example: "false" },
+      { key: "httpAuthFailCount", label: "认证失败次数", type: "number", unit: "次", desc: "401/403 响应计数", example: "0" },
+      { key: "httpVersion", label: "HTTP 版本", type: "enum", desc: "HTTP/1.0 / 1.1 / 2 / 3", example: "HTTP/1.1" },
+      { key: "httpIsProxy", label: "是否经代理", type: "boolean", desc: "是否带 X-Forwarded-For 等代理头", example: "false" },
+    ],
+  },
+  {
+    code: "tls",
+    label: "HTTPS / TLS 加密",
+    en: "TLS / SSL",
+    desc: "TLS 握手要素、证书属性与指纹，穿透加密流量的关键元数据",
+    fields: [
+      { key: "tlsVersion", label: "TLS 版本", type: "enum", desc: "TLS1.0 / 1.1 / 1.2 / 1.3", example: "TLS1.3" },
+      { key: "tlsSni", label: "SNI 服务器名", type: "string", desc: "ClientHello 中的服务器名称指示", example: "www.example.com" },
+      { key: "tlsCipherSuite", label: "加密套件", type: "string", desc: "协商出的密码套件", example: "TLS_AES_256_GCM_SHA384" },
+      { key: "tlsJa3", label: "JA3 指纹", type: "string", desc: "客户端 TLS 指纹，可识别恶意软件家族", example: "769,47-53,..." },
+      { key: "tlsJa3s", label: "JA3S 指纹", type: "string", desc: "服务端 TLS 指纹", example: "769,47,..." },
+      { key: "tlsCertSubject", label: "证书主体", type: "string", desc: "证书 Subject 字段", example: "CN=example.com" },
+      { key: "tlsCertIssuer", label: "证书颁发者", type: "string", desc: "证书 Issuer 字段", example: "CN=DigiCert TLS" },
+      { key: "tlsCertSelfSigned", label: "是否自签名", type: "boolean", desc: "证书是否自签名，C2 常见", example: "false" },
+      { key: "tlsCertValidDays", label: "证书有效期", type: "number", unit: "天", desc: "证书有效天数，短周期证书可疑", example: "398" },
+      { key: "tlsCertExpired", label: "证书是否过期", type: "boolean", desc: "观测时证书是否已过期", example: "false" },
+      { key: "tlsCertSnMatch", label: "SNI 与证书匹配", type: "boolean", desc: "SNI 与证书 CN/SAN 是否一致", example: "true" },
+      { key: "tlsAlpn", label: "ALPN 协议", type: "string", desc: "应用层协议协商结果", example: "h2" },
+      { key: "tlsSessionResumed", label: "会话复用", type: "boolean", desc: "是否使用会话票据复用", example: "false" },
+      { key: "tlsWeakCipher", label: "是否弱加密", type: "boolean", desc: "是否协商出已知弱加密套件", example: "false" },
+      { key: "tlsOldVersion", label: "是否老旧版本", type: "boolean", desc: "是否使用 TLS1.0/1.1 等淘汰版本", example: "false" },
+      { key: "tlsClientHelloLen", label: "ClientHello 长度", type: "number", unit: "B", desc: "客户端握手首包长度", example: "512" },
+      { key: "tlsServerNameLen", label: "SNI 长度", type: "number", unit: "字符", desc: "SNI 字符串长度", example: "18" },
+      { key: "tlsHandshakeMs", label: "TLS 握手耗时", type: "number", unit: "ms", desc: "TLS 握手完成耗时", example: "96" },
+      { key: "tlsCertChainLen", label: "证书链长度", type: "number", unit: "张", desc: "服务端提供的证书链数量", example: "3" },
+      { key: "tlsEncPayloadRatio", label: "加密载荷占比", type: "ratio", desc: "Application Data 占全部报文比例", example: "0.93" },
+    ],
+  },
+  {
+    code: "time",
+    label: "时间与周期特征",
+    en: "TEMPORAL PATTERN",
+    desc: "会话时间分布与周期性度量，心跳与非工作时间行为的基础",
+    fields: [
+      { key: "hourOfDay", label: "小时（0-23）", type: "number", desc: "会话开始的小时段", example: "3" },
+      { key: "dayOfWeek", label: "星期（1-7）", type: "number", desc: "会话开始的星期", example: "5" },
+      { key: "isWorkHour", label: "是否工作时间", type: "boolean", desc: "是否处于 9:00-18:00 工作日", example: "false" },
+      { key: "isNight", label: "是否深夜", type: "boolean", desc: "是否处于 0:00-6:00 时段", example: "true" },
+      { key: "intervalMean", label: "会话间隔均值", type: "number", unit: "s", desc: "同源同目的会话间隔平均值", example: "60.0" },
+      { key: "intervalStd", label: "会话间隔标准差", type: "number", unit: "s", desc: "间隔抖动，Beacon 该值趋近 0", example: "0.8" },
+      { key: "intervalCv", label: "间隔变异系数", type: "ratio", desc: "标准差/均值，周期性判据", example: "0.013" },
+      { key: "periodicityScore", label: "周期性得分", type: "number", desc: "0-100 周期性评分，心跳检测核心", example: "96" },
+      { key: "burstCount", label: "突发次数", type: "number", unit: "次", desc: "窗口内流量突发计数", example: "2" },
+      { key: "activeRatio", label: "活跃时间占比", type: "ratio", desc: "窗口内有流量的时间片占比", example: "0.34" },
+      { key: "nightSessionRatio", label: "深夜会话占比", type: "ratio", desc: "主机深夜会话数占全天比例", example: "0.61" },
+      { key: "weekendRatio", label: "周末会话占比", type: "ratio", desc: "主机周末会话占比", example: "0.12" },
+      { key: "firstSeen", label: "目的首次出现", type: "time", desc: "该目的 IP/域名在历史中的首次观测时间", example: "2026-09-12 11:02:10" },
+      { key: "isNewDestination", label: "是否新目的", type: "boolean", desc: "目的是否为 7 天内首次出现", example: "true" },
+    ],
+  },
+  {
+    code: "geo",
+    label: "地理与威胁情报",
+    en: "GEO & THREAT INTEL",
+    desc: "IP 地理归属、ASN 与威胁情报命中情况",
+    fields: [
+      { key: "srcCountry", label: "源国家/地区", type: "string", desc: "源 IP 地理归属", example: "中国" },
+      { key: "dstCountry", label: "目的国家/地区", type: "string", desc: "目的 IP 地理归属", example: "美国" },
+      { key: "srcAsn", label: "源 ASN", type: "number", desc: "源 IP 自治系统号", example: "4134" },
+      { key: "dstAsn", label: "目的 ASN", type: "number", desc: "目的 IP 自治系统号", example: "15169" },
+      { key: "dstAsnOrg", label: "目的 ASN 组织", type: "string", desc: "目的 IP 所属运营组织", example: "Google LLC" },
+      { key: "dstIsCloud", label: "是否云厂商", type: "boolean", desc: "目的是否属于公有云地址段", example: "true" },
+      { key: "dstIsTor", label: "是否 Tor 出口", type: "boolean", desc: "目的是否为 Tor 出口节点", example: "false" },
+      { key: "dstIsProxy", label: "是否代理/VPN", type: "boolean", desc: "目的是否为公开代理或 VPN", example: "false" },
+      { key: "dstThreatScore", label: "威胁情报评分", type: "number", desc: "0-100 威胁评分，越高越危险", example: "87" },
+      { key: "dstIsKnownC2", label: "命中 C2 情报", type: "boolean", desc: "目的是否命中已知 C2 情报库", example: "false" },
+      { key: "dstIsHighRiskGeo", label: "是否高危地区", type: "boolean", desc: "目的是否位于高危国家/地区清单", example: "false" },
+      { key: "geoDistanceKm", label: "地理距离", type: "number", unit: "km", desc: "源与目的的地理直线距离", example: "10472" },
+      { key: "dstCity", label: "目的城市", type: "string", desc: "目的 IP 归属城市", example: "法兰克福" },
+      { key: "ipReputation", label: "IP 信誉等级", type: "enum", desc: "良好 / 中立 / 可疑 / 恶意", example: "可疑" },
+    ],
+  },
+  {
+    code: "app",
+    label: "应用与内容特征",
+    en: "APPLICATION & CONTENT",
+    desc: "应用协议识别、文件传输与内容层面特征",
+    fields: [
+      { key: "appProtocol", label: "应用层协议", type: "enum", desc: "HTTP / HTTPS / DNS / SSH / FTP / SMB / RDP / SMTP 等", example: "HTTPS" },
+      { key: "appName", label: "应用名称", type: "string", desc: "应用识别引擎给出的应用名", example: "Chrome 浏览" },
+      { key: "appCategory", label: "应用分类", type: "enum", desc: "办公 / 文件传输 / 远程控制 / 代理工具 等", example: "远程控制" },
+      { key: "isCleartextProto", label: "是否明文协议", type: "boolean", desc: "是否 FTP/Telnet/HTTP 等明文协议", example: "false" },
+      { key: "authAttempts", label: "认证尝试次数", type: "number", unit: "次", desc: "会话内登录尝试计数", example: "1" },
+      { key: "authSuccess", label: "认证是否成功", type: "boolean", desc: "会话内是否出现成功登录", example: "true" },
+      { key: "fileTransferCount", label: "文件传输数", type: "number", unit: "个", desc: "会话内传输的文件数量", example: "0" },
+      { key: "fileName", label: "文件名", type: "string", desc: "传输文件名（可识别时）", example: "backup.zip" },
+      { key: "fileMime", label: "文件 MIME", type: "string", desc: "文件内容类型", example: "application/zip" },
+      { key: "fileSize", label: "文件大小", type: "number", unit: "B", desc: "传输文件字节数", example: "52428800" },
+      { key: "fileHashMd5", label: "文件 MD5", type: "string", desc: "传输文件 MD5 值", example: "d41d8cd98f00b204..." },
+      { key: "emailFrom", label: "邮件发件人", type: "string", desc: "SMTP 会话发件地址", example: "a@corp.com" },
+      { key: "emailToCount", label: "收件人数", type: "number", unit: "个", desc: "SMTP 会话收件人数量", example: "1" },
+      { key: "emailAttachCount", label: "附件数", type: "number", unit: "个", desc: "邮件附件数量", example: "0" },
+      { key: "dnsOverTls", label: "是否 DoT", type: "boolean", desc: "是否 DNS over TLS", example: "false" },
+      { key: "rpcService", label: "RPC/服务名", type: "string", desc: "SMB/RDP/SSH 等具体服务标识", example: "SMB2" },
+    ],
+  },
+  {
+    code: "corr",
+    label: "关联聚合特征",
+    en: "CORRELATION AGGREGATES",
+    desc: "跨会话聚合出的主机级行为指标，行为关联分析的直接输入",
+    fields: [
+      { key: "hostUniqueDstIp", label: "独立目的 IP 数", type: "number", unit: "个", desc: "窗口内源主机访问的不同目的 IP 数", example: "45" },
+      { key: "hostUniqueDstPort", label: "独立目的端口数", type: "number", unit: "个", desc: "窗口内源主机触达的不同端口数，扫描核心指标", example: "312" },
+      { key: "hostUniqueDstDomain", label: "独立目的域名数", type: "number", unit: "个", desc: "窗口内源主机访问的不同域名数", example: "87" },
+      { key: "hostSessionCount", label: "主机会话总数", type: "number", unit: "条", desc: "窗口内源主机会话数量", example: "1024" },
+      { key: "hostFanOut", label: "扇出度", type: "number", desc: "单主机一小时内触达的内网主机数，横向移动指标", example: "26" },
+      { key: "hostFailConnRatio", label: "连接失败率", type: "ratio", desc: "RST/超时会话占比，扫描与爆破特征", example: "0.81" },
+      { key: "hostUpBytesTotal", label: "主机上行总量", type: "number", unit: "B", desc: "窗口内主机上行字节合计", example: "858993459" },
+      { key: "hostDownBytesTotal", label: "主机下行总量", type: "number", unit: "B", desc: "窗口内主机下行字节合计", example: "214748364" },
+      { key: "hostUpBytesBaseline", label: "上行基线", type: "number", unit: "B", desc: "同类主机 7 日上行均值", example: "52428800" },
+      { key: "hostBaselineDeviation", label: "基线偏离倍数", type: "ratio", desc: "实际上行 / 基线上行，偏离越大越异常", example: "16.4" },
+      { key: "portDiversity", label: "端口离散度", type: "ratio", desc: "独立端口数 / 会话数", example: "0.92" },
+      { key: "dstSessionFanIn", label: "目的扇入度", type: "number", unit: "个", desc: "访问该目的的不同源主机数", example: "3" },
+      { key: "pairSessionCount", label: "会话对计数", type: "number", unit: "条", desc: "同一源-目的对的会话条数", example: "1440" },
+      { key: "pairByteSymmetry", label: "字节对称度", type: "ratio", desc: "min(上,下)/max(上,下)，心跳流量高度对称", example: "0.94" },
+      { key: "samePortHitCount", label: "同端口触达主机数", type: "number", unit: "个", desc: "源主机以同一目的端口触达的内网主机数", example: "18" },
+      { key: "newDestCount", label: "新目的数", type: "number", unit: "个", desc: "窗口内首次出现的目的数量", example: "12" },
+    ],
+  },
+];
+
+export const ALL_FIELDS: FieldDef[] = FIELD_CATEGORIES.flatMap((c) => c.fields);
+
+export const FIELD_COUNT = ALL_FIELDS.length;
+
+export function getField(key: string): FieldDef | undefined {
+  return ALL_FIELDS.find((f) => f.key === key);
+}

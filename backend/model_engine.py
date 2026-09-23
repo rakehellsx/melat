@@ -52,7 +52,10 @@ def _metric_expr(field: str, agg: str) -> str:
         raise ValueError(f"字段 {field} 不支持聚合 {agg}")
     if agg == "count":
         return "COUNT(*)"
-    expr = _field_expr(field, mdef.get("source") == "meta")
+    # meta 文本字段（如 dnsQueryName）做 countDistinct 时不能数值化，
+    # 否则 CAST(... AS DOUBLE) 会把所有字符串折叠为 0，去重计数恒为 1
+    numeric = mdef.get("source") == "meta" and agg != "countDistinct"
+    expr = _field_expr(field, numeric)
     fn = {"sum": "SUM", "avg": "AVG", "max": "MAX", "min": "MIN"}[agg] if agg != "countDistinct" else None
     return f"COUNT(DISTINCT {expr})" if fn is None else f"{fn}({expr})"
 

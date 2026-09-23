@@ -2600,9 +2600,14 @@ CREATE TABLE `custom_models` (
   `having_def` json DEFAULT NULL,
   `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`) /*T![clustered_index] CLUSTERED */
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci AUTO_INCREMENT=60001;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci AUTO_INCREMENT=60006;
 
 INSERT INTO `custom_models` (`id`, `name`, `description`, `severity`, `dimensions`, `metrics`, `filters`, `having_def`, `created_at`) VALUES
-(1,'单源多端口扫描识别','对同一源IP按目的端口去重计数，识别端口扫描行为','high','["srcIp"]','[{"agg": "countDistinct", "alias": "扫描端口数", "field": "dstPort"}, {"agg": "count", "alias": "会话数", "field": "*"}]','[{"field": "protocol", "op": "eq", "value": "TCP"}]','{"metricIndex": 0, "op": "gte", "value": 20}','2026-09-21 13:58:00');
+(1,'单源多端口扫描识别','对同一源IP按目的端口去重计数，识别端口扫描行为','high','["srcIp"]','[{"agg": "countDistinct", "alias": "扫描端口数", "field": "dstPort"}, {"agg": "count", "alias": "会话数", "field": "*"}]','[{"field": "protocol", "op": "eq", "value": "TCP"}]','{"metricIndex": 0, "op": "gte", "value": 20}','2026-09-21 13:58:00'),
+(60001,'夜间异常外联检测','夜间时段（isNight）内网主机向外发起大量会话或外发流量，识别非工作时间的异常外联行为','high','["srcIp", "isNight"]','[{"field": "*", "agg": "count", "alias": "夜间会话数"}, {"field": "upBytes", "agg": "sum", "alias": "夜间外发字节"}]','[{"field": "isNight", "op": "eq", "value": "true"}, {"field": "direction", "op": "eq", "value": "内到外"}]','{"metricIndex": 0, "op": "gte", "value": 15}','2026-09-23 07:37:53'),
+(60002,'大流量数据外发识别','按源-目的对聚合上行流量，单对累计外发超过 100MB 判定为疑似数据外泄','critical','["srcIp", "dstIp"]','[{"field": "upBytes", "agg": "sum", "alias": "外发总量"}, {"field": "*", "agg": "count", "alias": "会话数"}]','[{"field": "direction", "op": "eq", "value": "内到外"}]','{"metricIndex": 0, "op": "gte", "value": 104857600}','2026-09-23 07:37:54'),
+(60003,'DNS 隧道可疑检测','同一源 IP 解析大量唯一域名且伴随异常上行字节，识别利用 DNS 协议的隐蔽隧道通信','high','["srcIp"]','[{"field": "dnsQueryName", "agg": "countDistinct", "alias": "唯一域名数"}, {"field": "*", "agg": "count", "alias": "DNS 查询数"}, {"field": "upBytes", "agg": "sum", "alias": "上行字节"}]','[{"field": "appProtocol", "op": "eq", "value": "DNS"}]','{"metricIndex": 0, "op": "gte", "value": 80}','2026-09-23 07:37:56'),
+(60004,'恶意声誉 IP 通信告警','与威胁情报标记为「恶意」的 IP 发生 3 次以上通信即告警，并按平均威胁分排序','critical','["srcIp", "dstIp"]','[{"field": "*", "agg": "count", "alias": "通信次数"}, {"field": "threatScore", "agg": "avg", "alias": "平均威胁分"}]','[{"field": "ipReputation", "op": "eq", "value": "恶意"}]','{"metricIndex": 0, "op": "gte", "value": 3}','2026-09-23 07:37:57'),
+(60005,'内网横向移动探测','内到内方向上同一源主机触达大量不同内网主机，识别失陷后的横向移动行为','high','["srcIp"]','[{"field": "dstIp", "agg": "countDistinct", "alias": "触达主机数"}, {"field": "dstPort", "agg": "countDistinct", "alias": "触达端口数"}, {"field": "*", "agg": "count", "alias": "会话数"}]','[{"field": "direction", "op": "eq", "value": "内到内"}]','{"metricIndex": 0, "op": "gte", "value": 15}','2026-09-23 07:37:58');
 
 SET FOREIGN_KEY_CHECKS = 1;

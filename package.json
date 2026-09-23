@@ -4,7 +4,7 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "node api/dev.mjs",
     "build": "vite build && esbuild api/boot.ts --platform=node --bundle --format=esm --outfile=dist/boot.js --banner:js=\"import { createRequire } from 'module';const require = createRequire(import.meta.url);\"",
     "preview": "vite preview",
     "start": "python3 -m uvicorn backend.main:app --host 0.0.0.0 --port 3000",

@@ -22,7 +22,7 @@ export default function App() {
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>
-      <Toaster position="top-right" theme="dark" />
+      <Toaster position="top-right" theme="light" />
     </>
   );
 }

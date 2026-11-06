@@ -9,6 +9,7 @@ from .contracts import DIMENSIONS, METRIC_FIELDS
 # ---------- 字段 → SQL 表达式（白名单，杜绝注入） ----------
 
 COLUMN_EXPR = {
+    "sessionId": "session_id", "startTime": "start_time",
     "srcIp": "src_ip", "dstIp": "dst_ip",
     "srcPort": "src_port", "dstPort": "dst_port",
     "protocol": "protocol", "appProtocol": "app_protocol",
@@ -17,15 +18,21 @@ COLUMN_EXPR = {
     "upPackets": "up_packets", "downPackets": "down_packets",
     "duration": "duration", "threatScore": "threat_score",
     "totalBytes": "(up_bytes + down_bytes)",
+    "totalPackets": "(up_packets + down_packets)",
 }
 
 
 def _meta_text(key: str) -> str:
-    return f"JSON_UNQUOTE(JSON_EXTRACT(meta, '$.{key}'))"
+    return f"nullIf(nullIf(if(JSONType(meta, '{key}')='String',JSONExtractString(meta, '{key}'),JSONExtractRaw(meta, '{key}')), ''), 'null')"
 
 
 def _meta_num(key: str) -> str:
-    return f"CAST(JSON_UNQUOTE(JSON_EXTRACT(meta, '$.{key}')) AS DOUBLE)"
+    raw = f"nullIf(JSONExtractRaw(meta, '{key}'), 'null')"
+    field = next((f for f in DIMENSIONS if f['key'] == key), {})
+    if field.get('type') == 'boolean':
+        return f"multiIf({raw}='true',1.,{raw}='false',0.,toFloat64OrNull({raw}))"
+    return f"toFloat64OrNull({raw})"
+
 
 
 def _field_expr(key: str, numeric: bool = False) -> str:
@@ -54,7 +61,7 @@ def _metric_expr(field: str, agg: str) -> str:
         return "COUNT(*)"
     # meta 文本字段（如 dnsQueryName）做 countDistinct 时不能数值化，
     # 否则 CAST(... AS DOUBLE) 会把所有字符串折叠为 0，去重计数恒为 1
-    numeric = mdef.get("source") == "meta" and agg != "countDistinct"
+    numeric = mdef.get("numeric", False) and agg != "countDistinct"
     expr = _field_expr(field, numeric)
     fn = {"sum": "SUM", "avg": "AVG", "max": "MAX", "min": "MIN"}[agg] if agg != "countDistinct" else None
     return f"COUNT(DISTINCT {expr})" if fn is None else f"{fn}({expr})"
@@ -68,11 +75,17 @@ def _filter_conds(model_def: dict) -> tuple[list[str], list]:
     for f in model_def["filters"]:
         dim = next((d for d in DIMENSIONS if d["key"] == f["field"]), None)
         mfield = next((m for m in METRIC_FIELDS if m["key"] == f["field"]), None)
-        if not dim and not mfield:
+        if not dim and (not mfield or f["field"] == "*"):
             raise ValueError(f"非法过滤字段: {f['field']}")
         numeric = bool(dim.get("numeric")) if dim else (
             mfield["key"] not in ("srcIp", "dstIp", "dnsQueryName"))
         expr = _field_expr(f["field"], numeric)
+        value = f["value"]
+        if dim and dim.get("type") == "boolean":
+            text = str(value).strip().lower()
+            if text not in ("true", "false", "1", "0", "是", "否"):
+                raise ValueError("布尔字段请使用 true/false、是/否或 1/0")
+            value = 1 if text in ("true", "1", "是") else 0
         if f["op"] == "like":
             conds.append(f"{expr} LIKE %s")
             params.append(f"%{f['value']}%")
@@ -81,12 +94,11 @@ def _filter_conds(model_def: dict) -> tuple[list[str], list]:
             if not op:
                 raise ValueError(f"非法算子: {f['op']}")
             conds.append(f"{expr} {op} %s")
-            params.append(float(f["value"]) if numeric else str(f["value"]))
+            params.append(float(value) if numeric else str(value))
     return conds, params
 
 
-def run_model(model_def: dict) -> dict:
-    t0 = time.time()
+def _model_sql(model_def: dict):
     dims = model_def["dimensions"]
     mets = model_def["metrics"]
     if not dims:
@@ -118,8 +130,20 @@ def run_model(model_def: dict) -> dict:
         sql += f" HAVING {met_exprs[idx]} {op} %s"
         params.append(float(having["value"]))
 
-    sql += " LIMIT 500"
-    raw = query_all(sql, params)
+    return sql, params
+
+
+def run_model(model_def: dict, page=None) -> dict:
+    t0 = time.time()
+    dims, mets = model_def["dimensions"], model_def["metrics"]
+    sql, params = _model_sql(model_def)
+    total = int(query_all(f"SELECT COUNT(*) AS c FROM ({sql}) AS groups_count", params)[0]["c"])
+    order = " ORDER BY " + ", ".join(f"d{i}" for i in range(len(dims)))
+    if page is not None:
+        page = min(max(1, int(page)), max(1, (total + 9) // 10))
+        raw = query_all(sql + order + " LIMIT %s OFFSET %s", [*params, 10, (page - 1) * 10])
+    else:
+        raw = query_all(sql + order, params)
 
     columns = [
         *[next((x["label"] for x in DIMENSIONS if x["key"] == d), d) for d in dims],
@@ -140,45 +164,33 @@ def run_model(model_def: dict) -> dict:
 
     return {
         "columns": columns, "rows": rows,
-        "matched": len(rows), "total": len(rows),
+        "matched": total, "total": total, "page": page or 1, "pageSize": 10,
         "durationMs": int((time.time() - t0) * 1000),
     }
 
 
-def match_sessions_for_model(model_def: dict, limit: int = 300) -> dict:
-    """运行模型并反查命中分组对应的会话明细"""
-    run = run_model(model_def)
-    if not run["rows"]:
-        return {"run": run, "sessions": [], "sessionTotal": 0}
-
-    dims = model_def["dimensions"]
-    dim_exprs = [_dim_expr(d) for d in dims]
-
-    # 每个命中分组 = 各维度值全等；分组之间 OR
-    group_conds, params = [], []
-    for row in run["rows"][:50]:
-        parts = []
-        for i, expr in enumerate(dim_exprs):
-            v = row[f"d{i}"]
-            if v is None:
-                parts.append(f"{expr} IS NULL")
-            else:
-                parts.append(f"{expr} = %s")
-                params.append(v)
-        group_conds.append("(" + " AND ".join(parts) + ")")
-    hit_where = "(" + " OR ".join(group_conds) + ")"
-
-    conds, fparams = _filter_conds(model_def)
-    where = f"{hit_where} AND " + " AND ".join(f"({c})" for c in conds) if conds else hit_where
-    params += fparams
-
+def match_sessions_for_model(model_def: dict, page=1, groups_page=1) -> dict:
+    """Match all qualifying groups, with independent group/session pages."""
+    run = run_model(model_def, page=groups_page)
+    group_sql, group_params = _model_sql(model_def)
+    dim_exprs = [_dim_expr(d) for d in model_def["dimensions"]]
+    # Tuple keys distinguish a missing value from an empty string/zero.
+    def key(expr):
+        return f"tuple(isNull({expr}),ifNull(toString({expr}),''))"
+    source_key = 'tuple(' + ','.join(key(expr) for expr in dim_exprs) + ')'
+    hit_key = 'tuple(' + ','.join(key(f'd{i}') for i in range(len(dim_exprs))) + ')'
+    conds, filter_params = _filter_conds(model_def)
+    group_match = f"{source_key} IN (SELECT {hit_key} FROM ({group_sql}) AS hits)"
+    where = ' WHERE ' + ' AND '.join([group_match, *[f'({c})' for c in conds]])
+    source = f"FROM sessions{where}"
+    params = [*group_params, *filter_params]
+    cnt = int(query_all(f"SELECT COUNT(*) AS c {source}", params)[0]["c"])
+    page = min(max(1, int(page)), max(1, (cnt + 9) // 10))
     cols = ("id, session_id, src_ip, src_port, dst_ip, dst_port, protocol, app_protocol, "
             "direction, start_time, duration, up_packets, down_packets, up_bytes, down_bytes, "
             "dst_country, threat_score")
-    rows = query_all(
-        f"SELECT {cols} FROM sessions WHERE {where} ORDER BY start_time DESC LIMIT %s",
-        [*params, limit])
-    cnt = query_all(f"SELECT COUNT(*) AS c FROM sessions WHERE {where}", params)[0]["c"]
+    rows = query_all(f"SELECT {cols} {source} ORDER BY start_time DESC, id DESC LIMIT %s OFFSET %s",
+                     [*params, 10, (page - 1) * 10])
 
     sessions = [{
         "id": r["id"], "sessionId": r["session_id"], "srcIp": r["src_ip"],
@@ -192,4 +204,4 @@ def match_sessions_for_model(model_def: dict, limit: int = 300) -> dict:
         "threatScore": r["threat_score"],
     } for r in rows]
 
-    return {"run": run, "sessions": sessions, "sessionTotal": int(cnt)}
+    return {"run": run, "sessions": sessions, "sessionTotal": cnt, "page": page, "pageSize": 10}

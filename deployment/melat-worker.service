@@ -1,0 +1,17 @@
+[Unit]
+Description=Melat native PCAP import worker
+After=network.target clickhouse-server.service
+Requires=clickhouse-server.service
+[Service]
+Type=simple
+User=melat
+Group=melat
+WorkingDirectory=/opt/melat-native
+EnvironmentFile=/etc/melat/melat.env
+ExecStart=/opt/melat-native/.venv/bin/python -m backend.ingest_worker
+Restart=on-failure
+RestartSec=5
+MemoryMax=3G
+TimeoutStopSec=60
+[Install]
+WantedBy=multi-user.target

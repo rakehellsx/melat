@@ -14,13 +14,13 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PYLIBS = path.join(ROOT, "pylibs");
 const BACKEND_PORT = 3001;
 const PUBLIC_PORT = parseInt(process.env.PORT || "3000", 10);
-const PY_BINS = ["python3.12", "python3.13", "python3.11", "python3.10", "python3", "python"];
+const PY_BINS = [path.join(ROOT, ".venv", "bin", "python"), "python3.12", "python3.13", "python3.11", "python3.10", "python3", "python"];
 
 function resolvePython() {
   for (const bin of PY_BINS) {
     const v = spawnSync(bin, ["-c", "import sys; print(sys.version.split()[0])"], { encoding: "utf8" });
     if (v.error || v.status !== 0) continue;
-    const t = spawnSync(bin, ["-c", "import fastapi, uvicorn, pymysql"], {
+    const t = spawnSync(bin, ["-c", "import fastapi, uvicorn, pyshark"], {
       encoding: "utf8",
       env: { ...process.env, PYTHONPATH: PYLIBS },
     });
@@ -32,7 +32,7 @@ function resolvePython() {
 
 const bin = resolvePython();
 if (!bin) {
-  console.error("[dev] 未找到可用的 Python 运行时（需要 fastapi/uvicorn/pymysql，见 pylibs/）");
+  console.error("[dev] 未找到可用的 Python 运行时（需要 fastapi/uvicorn/pyshark，见 pylibs/）");
   process.exit(1);
 }
 

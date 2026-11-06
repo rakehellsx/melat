@@ -1,0 +1,17 @@
+[Unit]
+Description=Melat native web application
+After=network.target clickhouse-server.service
+Requires=clickhouse-server.service
+[Service]
+Type=simple
+User=melat
+Group=melat
+WorkingDirectory=/opt/melat-native
+EnvironmentFile=/etc/melat/melat.env
+ExecStart=/opt/melat-native/.venv/bin/python -m uvicorn backend.main:app --host 0.0.0.0 --port 3000
+Restart=on-failure
+RestartSec=5
+MemoryMax=2G
+TimeoutStopSec=30
+[Install]
+WantedBy=multi-user.target

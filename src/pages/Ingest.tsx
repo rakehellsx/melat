@@ -1,4 +1,5 @@
-import { useRef, useState } from "react";
+import ListPagination from "@/components/ListPagination";
+import { useEffect, useRef, useState } from "react";
 import { trpc } from "@/providers/trpc";
 import { PageHeader } from "@/components/Layout";
 import { fmtBytes, fmtTime } from "@/lib/format";
@@ -17,13 +18,18 @@ interface UploadResult {
   imported: number;
   protoDist: Record<string, number>;
   durationMs: number;
+  normalizedTimestamps?: number;
 }
 
 export default function Ingest() {
   const utils = trpc.useUtils();
-  const batches = trpc.ingest.batches.useQuery();
+  const [page, setPage] = useState(1);
+  const batches = trpc.ingest.batches.useQuery({ page });
   const [dragOver, setDragOver] = useState(false);
-  const [uploading, setUploading] = useState(false);
+  const [jobId, setJobId] = useState<string | null>(() => localStorage.getItem("melat-import-job"));
+  const [uploading, setUploading] = useState(() => !!localStorage.getItem("melat-import-job"));
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [jobProgress, setJobProgress] = useState<{ status: string; packets: number; imported: number }>({ status: "queued", packets: 0, imported: 0 });
   const [result, setResult] = useState<UploadResult | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -43,35 +49,77 @@ export default function Ingest() {
     },
   });
 
+  useEffect(() => {
+    if (!jobId) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    async function poll() {
+      try {
+        const response = await fetch(`/api/rpc/ingest.job?input=${encodeURIComponent(JSON.stringify({ id: jobId }))}`);
+        const job = await response.json();
+        if (cancelled) return;
+        if (!response.ok) throw new Error(job.detail ?? "查询导入状态失败");
+        setJobProgress(job);
+        if (job.status === "success" || job.status === "failed") {
+          localStorage.removeItem("melat-import-job");
+          setJobId(null);
+          setUploading(false);
+          if (job.status === "failed") toast.error(job.error ?? "导入失败，请重新上传");
+          else {
+            setResult(job.result);
+            setPage(1);
+            toast.success(`导入完成：${job.result.packets} 个报文 → ${job.result.imported} 条会话`);
+            utils.ingest.batches.invalidate();
+            utils.dashboard.overview.invalidate();
+            utils.session.list.invalidate();
+          }
+          return;
+        }
+      } catch (error) {
+        if (!cancelled) toast.error(error instanceof Error ? error.message : "查询导入状态失败");
+      }
+      if (!cancelled) timer = setTimeout(poll, 1500);
+    }
+    poll();
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [jobId]);
+
   async function upload(file: File) {
-    if (!file.name.toLowerCase().endsWith(".pcap") && !file.name.toLowerCase().endsWith(".cap")) {
-      toast.error("请上传 .pcap 文件（classic pcap 格式）");
+    if (uploading) return;
+    if (!/\.(pcap|pcapng|cap)$/i.test(file.name)) {
+      toast.error("请上传 .pcap、.pcapng 或 .cap 抓包文件");
       return;
     }
-    if (file.size > 50 * 1024 * 1024) {
-      toast.error("文件超过 50MB 限制");
+    if (file.size > 2 * 1024 * 1024 * 1024) {
+      toast.error("单文件不能超过 2 GB");
       return;
     }
     setUploading(true);
+    setUploadProgress(0);
     setResult(null);
     try {
-      const resp = await fetch("/api/upload/pcap", {
-        method: "POST",
-        headers: { "x-filename": encodeURIComponent(file.name), "Content-Type": "application/octet-stream" },
-        body: file,
+      const data = await new Promise<{ jobId: string }>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", "/api/upload/pcap");
+        xhr.setRequestHeader("x-filename", encodeURIComponent(file.name));
+        xhr.setRequestHeader("Content-Type", "application/octet-stream");
+        xhr.upload.onprogress = event => { if (event.lengthComputable) setUploadProgress(Math.round(event.loaded / event.total * 100)); };
+        xhr.onload = () => {
+          try {
+            const body = JSON.parse(xhr.responseText);
+            if (xhr.status >= 200 && xhr.status < 300) resolve(body);
+            else reject(new Error(body.detail ?? "上传失败"));
+          } catch { reject(new Error("服务器响应异常，请重试")); }
+        };
+        xhr.onerror = () => reject(new Error("上传连接中断，请重试"));
+        xhr.send(file);
       });
-      const data = await resp.json();
-      if (!resp.ok) {
-        toast.error(data.error ?? "解析失败");
-      } else {
-        setResult(data);
-        toast.success(`解析完成：${data.packets} 个报文 → ${data.imported} 条会话入库`);
-        utils.ingest.batches.invalidate();
-        utils.dashboard.overview.invalidate();
-      }
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "上传失败");
-    } finally {
+      localStorage.setItem("melat-import-job", data.jobId);
+      setJobProgress({ status: "queued", packets: 0, imported: 0 });
+      setJobId(data.jobId);
+      toast.success("文件已上传，正在排队解析");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "上传失败");
       setUploading(false);
     }
   }
@@ -79,7 +127,7 @@ export default function Ingest() {
   return (
     <div>
       <PageHeader
-        title="数据接入"
+        title="数据导入"
         en="PCAP INGEST"
         desc="上传 pcap 抓包文件，解析为五元组会话元数据入库，可直接进入行为关联分析"
       />
@@ -93,14 +141,15 @@ export default function Ingest() {
           const f = e.dataTransfer.files?.[0];
           if (f) upload(f);
         }}
-        onClick={() => inputRef.current?.click()}
+        onClick={() => { if (!uploading) inputRef.current?.click(); }}
         className="panel flex cursor-pointer flex-col items-center justify-center gap-3 border-dashed py-14 transition-colors"
         style={dragOver ? { borderColor: "var(--mint)", background: "var(--mint-dim)" } : {}}
       >
         <input
           ref={inputRef}
           type="file"
-          accept=".pcap,.cap"
+          disabled={uploading}
+          accept=".pcap,.pcapng,.cap"
           className="hidden"
           onChange={(e) => {
             const f = e.target.files?.[0];
@@ -109,11 +158,11 @@ export default function Ingest() {
           }}
         />
         <UploadCloud className="h-10 w-10" style={{ color: "var(--mint)" }} />
-        <div className="text-sm text-neutral-200">
-          {uploading ? "解析入库中…" : "拖拽 pcap 文件到此处，或点击选择文件"}
+        <div className="text-sm text-neutral-800">
+          {uploading ? (jobId ? (jobProgress.status === "queued" ? "排队等待解析…" : `解析导入中：${jobProgress.packets.toLocaleString()} 个报文，已入库 ${jobProgress.imported.toLocaleString()} 条会话`) : `文件上传中 ${uploadProgress}%`) : "拖拽 pcap 文件到此处，或点击选择文件"}
         </div>
         <div className="text-xs text-neutral-500">
-          支持 classic pcap（Ethernet / IPv4 / TCP / UDP），自动解析 DNS、TLS SNI、HTTP 要素 · 单文件 ≤ 50MB
+          支持 PCAP / PCAPNG、IPv4 / IPv6，自动解析 DNS、TLS、HTTP 等协议 · 单文件 ≤ 2 GB；上传后后台处理，可刷新查看进度
         </div>
       </div>
 
@@ -131,20 +180,25 @@ export default function Ingest() {
               <button
                 onClick={() => runAll.mutate()}
                 disabled={runAll.isPending}
-                className="flex items-center gap-1.5 rounded-md px-3.5 py-2 text-xs font-medium text-black disabled:opacity-50"
+                className="flex items-center gap-1.5 rounded-md px-3.5 py-2 text-xs font-medium text-white disabled:opacity-50"
                 style={{ background: "var(--mint)" }}
               >
                 <Zap className="h-3.5 w-3.5" /> {runAll.isPending ? "分析中…" : "运行全量分析"}
               </button>
               <Link
                 to="/sessions"
-                className="flex items-center gap-1.5 rounded-md border px-3.5 py-2 text-xs text-neutral-300"
+                className="flex items-center gap-1.5 rounded-md border px-3.5 py-2 text-xs text-neutral-700"
                 style={{ borderColor: "var(--line)" }}
               >
                 查看会话 <ArrowRight className="h-3.5 w-3.5" />
               </Link>
             </div>
           </div>
+          {!!result.normalizedTimestamps && (
+            <p className="mt-3 text-sm text-amber-700" role="status">
+              已规范化 {result.normalizedTimestamps.toLocaleString()} 条异常时间戳；涉及时间的分析结果请结合原始抓包核验。
+            </p>
+          )}
           <div className="grid grid-cols-2 gap-3 lg:grid-cols-6">
             {[
               { k: "文件大小", v: fmtBytes(result.sizeBytes) },
@@ -160,10 +214,10 @@ export default function Ingest() {
               </div>
             ))}
           </div>
-          <div className="mt-3 flex items-center gap-2 text-xs text-neutral-400">
+          <div className="mt-3 flex items-center gap-2 text-xs text-neutral-600">
             <span className="micro-label">PROTOCOLS</span>
             {Object.entries(result.protoDist).map(([k, v]) => (
-              <span key={k} className="rounded bg-white/5 px-2 py-0.5">
+              <span key={k} className="rounded bg-slate-100 px-2 py-0.5">
                 {k} <span className="num" style={{ color: "var(--mint)" }}>{v}</span>
               </span>
             ))}
@@ -188,14 +242,14 @@ export default function Ingest() {
             </tr>
           </thead>
           <tbody>
-            {batches.data?.map((b) => (
+            {batches.data?.rows.map((b) => (
               <tr key={b.id} className="border-t text-xs" style={{ borderColor: "var(--line)" }}>
                 <td className="num py-2.5 pr-3" style={{ color: "var(--mint)" }}>#{b.id}</td>
-                <td className="py-2.5 pr-3 text-neutral-200">{decodeURIComponent(b.filename)}</td>
-                <td className="num py-2.5 pr-3 text-right text-neutral-400">{fmtBytes(b.sizeBytes)}</td>
-                <td className="num py-2.5 pr-3 text-right text-neutral-300">{b.packets.toLocaleString()}</td>
-                <td className="num py-2.5 pr-3 text-right text-neutral-300">{b.flows}</td>
-                <td className="num py-2.5 pr-3 text-right text-neutral-400">{b.durationMs}ms</td>
+                <td className="py-2.5 pr-3 text-neutral-800">{decodeURIComponent(b.filename)}</td>
+                <td className="num py-2.5 pr-3 text-right text-neutral-600">{fmtBytes(b.sizeBytes)}</td>
+                <td className="num py-2.5 pr-3 text-right text-neutral-700">{b.packets.toLocaleString()}</td>
+                <td className="num py-2.5 pr-3 text-right text-neutral-700">{b.flows}</td>
+                <td className="num py-2.5 pr-3 text-right text-neutral-600">{b.durationMs}ms</td>
                 <td className="num py-2.5 pr-3 text-right text-neutral-500">{fmtTime(b.createdAt)}</td>
                 <td className="py-2.5 text-right">
                   <button
@@ -208,11 +262,12 @@ export default function Ingest() {
                 </td>
               </tr>
             ))}
-            {batches.data?.length === 0 && (
+            {batches.data?.rows.length === 0 && (
               <tr><td colSpan={8} className="py-8 text-center text-xs text-neutral-500">尚未接入过 pcap 数据</td></tr>
             )}
           </tbody>
         </table>
+        <ListPagination label="接入批次" page={page} total={batches.data?.total} onPageChange={setPage} loading={batches.isFetching} />
       </div>
     </div>
   );

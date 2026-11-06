@@ -22,8 +22,14 @@ dist-ssr
 *.sln
 *.sw?
 # Environment variables
+.env
 .env.local
 .env.*.local
+.venv/
+pylibs/
+__pycache__/
+*.py[cod]
+dist/
 # Database
 *.db
 *.sqlite

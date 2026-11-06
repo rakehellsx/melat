@@ -20,18 +20,18 @@ export function fmtDuration(ms: number): string {
 }
 
 export const SEVERITY_STYLE: Record<string, { label: string; color: string; bg: string }> = {
-  critical: { label: "严重", color: "#ff4444", bg: "rgba(255,68,68,0.12)" },
-  high: { label: "高危", color: "#ff8c42", bg: "rgba(255,140,66,0.12)" },
-  medium: { label: "中危", color: "#ffd166", bg: "rgba(255,209,102,0.12)" },
+  critical: { label: "严重", color: "#dc2626", bg: "rgba(255,68,68,0.12)" },
+  high: { label: "高危", color: "#c2410c", bg: "rgba(255,140,66,0.12)" },
+  medium: { label: "中危", color: "#a16207", bg: "rgba(255,209,102,0.12)" },
   low: { label: "低危", color: "#6b7280", bg: "rgba(107,114,128,0.15)" },
 };
 
 export const CATEGORY_STYLE: Record<string, { label: string; color: string }> = {
-  attack: { label: "入侵攻击", color: "#ff8c42" },
-  c2: { label: "C&C 通信", color: "#ff4444" },
-  data: { label: "数据安全", color: "#00d9a3" },
-  baseline: { label: "基线异常", color: "#7aa2ff" },
-  custom: { label: "自定义模型", color: "#9d7aff" },
+  attack: { label: "入侵攻击", color: "#c2410c" },
+  c2: { label: "C&C 通信", color: "#dc2626" },
+  data: { label: "数据安全", color: "#047857" },
+  baseline: { label: "基线异常", color: "#2563eb" },
+  custom: { label: "自定义模型", color: "#7c3aed" },
 };
 
 export const FIELD_TYPE_LABEL: Record<string, string> = {

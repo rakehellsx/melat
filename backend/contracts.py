@@ -1,4 +1,4 @@
-"""前后端共享契约（由 contracts/*.ts 机械转换，内容保持一致）"""
+"""前后端共享字段目录；建模白名单从完整目录派生，与 contracts/modeling.ts 一致"""
 
 FIELD_CATEGORIES = [{'code': 'five_tuple',
   'label': '五元组与链路',
@@ -989,43 +989,6 @@ SEVERITY_META = {'critical': {'label': '严重', 'order': 4},
  'medium': {'label': '中危', 'order': 2},
  'low': {'label': '低危', 'order': 1}}
 
-DIMENSIONS = [{'key': 'srcIp', 'label': '源 IP', 'source': 'column'},
- {'key': 'dstIp', 'label': '目的 IP', 'source': 'column'},
- {'key': 'srcPort', 'label': '源端口', 'source': 'column'},
- {'key': 'dstPort', 'label': '目的端口', 'source': 'column'},
- {'key': 'protocol', 'label': '传输层协议', 'source': 'column'},
- {'key': 'appProtocol', 'label': '应用层协议', 'source': 'column'},
- {'key': 'direction', 'label': '会话方向', 'source': 'column'},
- {'key': 'dstCountry', 'label': '目的国家/地区', 'source': 'column'},
- {'key': 'hourOfDay', 'label': '小时（0-23）', 'source': 'meta', 'numeric': True},
- {'key': 'isNight', 'label': '是否深夜', 'source': 'meta'},
- {'key': 'isWorkHour', 'label': '是否工作时间', 'source': 'meta'},
- {'key': 'dnsQueryType', 'label': 'DNS 查询类型', 'source': 'meta'},
- {'key': 'dnsRcode', 'label': 'DNS 响应码', 'source': 'meta'},
- {'key': 'dnsTld', 'label': 'DNS 顶级域', 'source': 'meta'},
- {'key': 'tlsVersion', 'label': 'TLS 版本', 'source': 'meta'},
- {'key': 'httpMethod', 'label': 'HTTP 方法', 'source': 'meta'},
- {'key': 'httpStatus', 'label': 'HTTP 状态码', 'source': 'meta', 'numeric': True},
- {'key': 'closeReason', 'label': '关闭方式', 'source': 'meta'},
- {'key': 'tcpState', 'label': '会话终态', 'source': 'meta'},
- {'key': 'sensorId', 'label': '采集探针', 'source': 'meta'},
- {'key': 'ipReputation', 'label': 'IP 信誉', 'source': 'meta'},
- {'key': 'dstAsnOrg', 'label': '目的 ASN 组织', 'source': 'meta'}]
-
-METRIC_FIELDS = [{'key': '*', 'label': '会话数', 'source': 'column', 'aggs': ['count']},
- {'key': 'upBytes', 'label': '上行字节', 'source': 'column', 'aggs': ['sum', 'avg', 'max', 'min']},
- {'key': 'downBytes', 'label': '下行字节', 'source': 'column', 'aggs': ['sum', 'avg', 'max', 'min']},
- {'key': 'totalBytes', 'label': '总字节', 'source': 'computed', 'aggs': ['sum', 'avg', 'max', 'min']},
- {'key': 'upPackets', 'label': '上行包数', 'source': 'column', 'aggs': ['sum', 'avg', 'max', 'min']},
- {'key': 'downPackets', 'label': '下行包数', 'source': 'column', 'aggs': ['sum', 'avg', 'max', 'min']},
- {'key': 'duration', 'label': '会话时长', 'source': 'column', 'aggs': ['sum', 'avg', 'max', 'min']},
- {'key': 'threatScore', 'label': '威胁评分', 'source': 'column', 'aggs': ['avg', 'max']},
- {'key': 'srcIp', 'label': '独立源 IP', 'source': 'column', 'aggs': ['countDistinct']},
- {'key': 'dstIp', 'label': '独立目的 IP', 'source': 'column', 'aggs': ['countDistinct']},
- {'key': 'dstPort', 'label': '独立目的端口', 'source': 'column', 'aggs': ['countDistinct']},
- {'key': 'srcPort', 'label': '独立源端口', 'source': 'column', 'aggs': ['countDistinct']},
- {'key': 'dnsQueryName', 'label': '独立域名', 'source': 'meta', 'aggs': ['countDistinct']}]
-
 AGG_LABEL = {'count': '计数', 'sum': '求和', 'avg': '均值', 'max': '最大值', 'min': '最小值', 'countDistinct': '去重计数'}
 
 OP_LABEL = {'eq': '=', 'ne': '≠', 'gt': '>', 'gte': '≥', 'lt': '<', 'lte': '≤', 'like': '包含'}
@@ -1036,3 +999,21 @@ MODELING_STEPS = [{'no': 1, 'title': '定义模型', 'desc': '名称、用途与
  {'no': 4, 'title': '过滤与阈值', 'desc': '数据过滤条件与告警触发阈值'},
  {'no': 5, 'title': '运行验证', 'desc': '保存模型并对全量会话执行分析'}]
 
+
+
+# Generate the modeling whitelist from the same full catalog used by the UI.
+_COLUMN_KEYS = {"sessionId", "srcIp", "srcPort", "dstIp", "dstPort", "protocol", "appProtocol",
+                "direction", "dstCountry", "startTime", "upBytes", "downBytes", "upPackets",
+                "downPackets", "duration", "threatScore"}
+DIMENSIONS = [{"key": f["key"], "label": f["label"], "type": f["type"], "category": category["label"],
+               "source": "column" if f["key"] in _COLUMN_KEYS else "meta",
+               "numeric": f["type"] in ("number", "port", "ratio", "boolean")}
+              for category in FIELD_CATEGORIES for f in category["fields"]]
+METRIC_FIELDS = [{"key": "*", "label": "会话数", "source": "column", "aggs": ["count"]}] + [
+    {**f, "aggs": ["count", "countDistinct", "sum", "avg", "max", "min"] if f["numeric"]
+     else ["count", "countDistinct"]} for f in DIMENSIONS]
+
+# Preserve the original database risk-score metric in addition to catalog fields.
+METRIC_FIELDS.insert(1, {"key": "threatScore", "label": "威胁评分", "source": "column",
+                         "numeric": True, "type": "number",
+                         "aggs": ["count", "countDistinct", "sum", "avg", "max", "min"]})

@@ -1,0 +1,2 @@
+# Legacy snapshot export only; not required by the application.
+PyMySQL[rsa]>=1.1

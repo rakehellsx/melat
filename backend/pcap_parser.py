@@ -1,383 +1,411 @@
-"""纯 Python pcap 解析器
-支持 classic pcap（libpcap）格式、Ethernet(含 VLAN) / IPv4 / TCP / UDP，
-会话化为五元组流，并深度解析 DNS、TLS ClientHello(SNI)、HTTP 要素。
+"""PyShark/TShark protocol dissection and bidirectional session aggregation.
+
+PCAP/PCAPNG, supported link types, IPv4/IPv6, and TCP reassembly are
+handled by TShark. Output preserves the existing session importer contract.
 """
-import math
+import asyncio
+import ipaddress
 import struct
+import tempfile
 from datetime import datetime, timezone
+from pathlib import Path
+from contextlib import contextmanager
+from .flow_store import FlowStore
 
-DNS_TYPES = {1: "A", 2: "NS", 5: "CNAME", 6: "SOA", 12: "PTR", 15: "MX",
-             16: "TXT", 28: "AAAA", 33: "SRV", 255: "ANY", 65: "HTTPS"}
-DNS_RCODES = {0: "NOERROR", 1: "FORMERR", 2: "SERVFAIL", 3: "NXDOMAIN", 5: "REFUSED"}
-TLS_VERSIONS = {0x0301: "TLS1.0", 0x0302: "TLS1.1", 0x0303: "TLS1.2", 0x0304: "TLS1.3"}
-
-INACTIVE_TIMEOUT_MS = 30_000  # 类 NetFlow 非活跃超时：超过则切分为新会话
-
-
-def ip4(buf: bytes, off: int) -> str:
-    return f"{buf[off]}.{buf[off + 1]}.{buf[off + 2]}.{buf[off + 3]}"
+INACTIVE_TIMEOUT_MS = 30_000
+DNS_TYPES = {1: 'A', 2: 'NS', 5: 'CNAME', 6: 'SOA', 12: 'PTR', 15: 'MX',
+             16: 'TXT', 28: 'AAAA', 33: 'SRV', 65: 'HTTPS', 255: 'ANY'}
+DNS_RCODES = {0: 'NOERROR', 1: 'FORMERR', 2: 'SERVFAIL', 3: 'NXDOMAIN', 4: 'NOTIMP', 5: 'REFUSED'}
+TLS_VERSIONS = {0x0301: 'TLS1.0', 0x0302: 'TLS1.1', 0x0303: 'TLS1.2', 0x0304: 'TLS1.3'}
+PRIVATE_NETWORKS = tuple(ipaddress.ip_network(v) for v in
+                         ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16',
+                          '169.254.0.0/16', 'fc00::/7', 'fe80::/10'))
 
 
 def is_private_ip(ip: str) -> bool:
-    p = [int(x) for x in ip.split(".")]
-    return p[0] == 10 or p[0] == 127 or (p[0] == 172 and 16 <= p[1] <= 31) or (p[0] == 192 and p[1] == 168)
+    address = ipaddress.ip_address(ip)
+    return address.is_loopback or any(address.version == n.version and address in n for n in PRIVATE_NETWORKS)
 
 
-def _flow_key(src_ip, src_port, dst_ip, dst_port, proto) -> str:
-    return f"{src_ip}:{src_port}|{dst_ip}:{dst_port}|{proto}"
+def _time(ms):
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).replace(tzinfo=None)
 
 
-# ---------- DNS 解析 ----------
-
-def _parse_dns_name(buf: bytes, off: int) -> tuple[str, int]:
-    labels = []
-    pos = off
-    jumped = False
-    nxt = off
-    hops = 0
-    while pos < len(buf) and hops < 32:
-        hops += 1
-        length = buf[pos]
-        if length == 0:
-            if not jumped:
-                nxt = pos + 1
-            break
-        if (length & 0xC0) == 0xC0:
-            ptr = ((length & 0x3F) << 8) | buf[pos + 1]
-            if not jumped:
-                nxt = pos + 2
-            pos = ptr
-            jumped = True
-            continue
-        labels.append(buf[pos + 1: pos + 1 + length].decode("latin1"))
-        pos += 1 + length
-        if not jumped:
-            nxt = pos
-    return ".".join(labels), nxt
-
-
-def _parse_dns(payload: bytes) -> dict | None:
-    if len(payload) < 12:
-        return None
-    flags = struct.unpack_from(">H", payload, 2)[0]
-    is_response = (flags & 0x8000) != 0
-    rcode = flags & 0x000F
-    qdcount = struct.unpack_from(">H", payload, 4)[0]
-    ancount = struct.unpack_from(">H", payload, 6)[0]
-    if qdcount == 0:
+def _layer(packet, name):
+    try:
+        return packet[name]
+    except (KeyError, AttributeError):
         return None
 
-    qname, pos = _parse_dns_name(payload, 12)
-    if pos + 4 > len(payload):
-        return None
-    qtype = struct.unpack_from(">H", payload, pos)[0]
-    pos += 4
 
-    answer_ips = []
-    first_ttl = None
-    p = pos
-    for _ in range(min(ancount, 20)):
-        _, p = _parse_dns_name(payload, p)
-        if p + 10 > len(payload):
-            break
-        rtype = struct.unpack_from(">H", payload, p)[0]
-        ttl = struct.unpack_from(">I", payload, p + 4)[0]
-        rdlen = struct.unpack_from(">H", payload, p + 8)[0]
-        p += 10
-        if p + rdlen > len(payload):
-            break
-        if first_ttl is None:
-            first_ttl = ttl
-        if rtype == 1 and rdlen == 4:
-            answer_ips.append(ip4(payload, p))
-        p += rdlen
-
-    return {
-        "queryName": qname,
-        "queryType": DNS_TYPES.get(qtype, f"TYPE{qtype}"),
-        "rcode": DNS_RCODES.get(rcode, f"RCODE{rcode}"),
-        "answerCount": ancount,
-        "answerIps": answer_ips,
-        "ttl": first_ttl,
-        "responseSize": len(payload),
-        "isResponse": is_response,
-    }
-
-
-# ---------- TLS ClientHello 解析 ----------
-
-def _parse_tls_client_hello(payload: bytes) -> dict | None:
-    if len(payload) < 9 or payload[0] != 0x16:
-        return None
-    rec_ver = struct.unpack_from(">H", payload, 1)[0]
-    if payload[5] != 0x01:  # ClientHello
-        return None
-    ver = TLS_VERSIONS.get(rec_ver)
-    pos = 5 + 4 + 2 + 32  # hs header + client version + random
-    if pos + 1 > len(payload):
-        return {"sni": None, "version": ver, "cipherSuites": 0}
-    sid_len = payload[pos]
-    pos += 1 + sid_len
-    if pos + 2 > len(payload):
-        return {"sni": None, "version": ver, "cipherSuites": 0}
-    cs_len = struct.unpack_from(">H", payload, pos)[0]
-    cipher_suites = cs_len // 2
-    pos += 2 + cs_len
-    if pos + 1 > len(payload):
-        return {"sni": None, "version": ver, "cipherSuites": cipher_suites}
-    comp_len = payload[pos]
-    pos += 1 + comp_len
-    if pos + 2 > len(payload):
-        return {"sni": None, "version": ver, "cipherSuites": cipher_suites}
-    ext_total = struct.unpack_from(">H", payload, pos)[0]
-    pos += 2
-    ext_end = min(pos + ext_total, len(payload))
-    sni = None
-    while pos + 4 <= ext_end:
-        ext_type, ext_len = struct.unpack_from(">HH", payload, pos)
-        pos += 4
-        if ext_type == 0x0000 and pos + ext_len <= len(payload):
-            sp = pos + 2  # list length
-            if sp + 3 <= pos + ext_len:
-                name_type = payload[sp]
-                name_len = struct.unpack_from(">H", payload, sp + 1)[0]
-                if name_type == 0 and sp + 3 + name_len <= len(payload):
-                    sni = payload[sp + 3: sp + 3 + name_len].decode("latin1")
-            break
-        pos += ext_len
-    return {"sni": sni, "version": ver, "cipherSuites": cipher_suites}
-
-
-# ---------- HTTP 解析 ----------
-
-import re
-
-HTTP_REQ_RE = re.compile(r"^(GET|POST|PUT|DELETE|HEAD|OPTIONS|PATCH) (\S+) HTTP/1\.[01]\r?\n")
-HTTP_RESP_RE = re.compile(r"^HTTP/1\.[01] (\d{3})")
-HTTP_HOST_RE = re.compile(r"(?:^|\r?\n)Host: ([^\r\n]+)", re.IGNORECASE)
-HTTP_UA_RE = re.compile(r"(?:^|\r?\n)User-Agent: ([^\r\n]+)", re.IGNORECASE)
-
-
-def _parse_http(payload: bytes) -> dict | None:
-    if len(payload) < 16:
-        return None
-    head = payload[: min(len(payload), 2048)].decode("latin1")
-    m = HTTP_REQ_RE.match(head)
-    if m:
-        host = HTTP_HOST_RE.search(head)
-        ua = HTTP_UA_RE.search(head)
-        return {"method": m.group(1), "host": host.group(1).strip() if host else None,
-                "uri": m.group(2), "userAgent": ua.group(1).strip() if ua else None, "status": None}
-    m = HTTP_RESP_RE.match(head)
-    if m:
-        return {"method": None, "host": None, "uri": None, "userAgent": None,
-                "status": int(m.group(1))}
+def _value(layer, *names):
+    if layer is not None:
+        for name in names:
+            values = _field_values(layer, name)
+            value = values[0] if values else None
+            if value is not None:
+                return str(value)
     return None
 
 
-# ---------- 主解析入口 ----------
+def _values(layer, name):
+    if layer is None:
+        return []
+    return [str(value) for value in _field_values(layer, name)]
 
-def _new_flow(src_ip, src_port, dst_ip, dst_port, proto, ts_ms, ttl) -> dict:
-    t = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).replace(tzinfo=None)
+
+def _field_values(layer, name):
+    # EK avoids constructing XML field objects for every packet. Read its raw
+    # flattened fields so repeated TLS/DNS values retain the same semantics.
+    fields = getattr(layer, '_fields_dict', None)
+    if fields is not None:
+        prefix = layer.layer_name
+        values = []
+        for fields_dict in fields if isinstance(fields, list) else [fields]:
+            if not isinstance(fields_dict, dict):
+                continue
+            value = fields_dict.get(f'{prefix}_{prefix}_{name}', fields_dict.get(f'{prefix}_{name}'))
+            values.extend(value if isinstance(value, list) else ([] if value is None else [value]))
+        return values
+    field = layer.get_field(name)
+    return [str(item.show) for item in field.all_fields] if field else []
+
+
+def _has_field(layer, name):
+    fields = getattr(layer, '_fields_dict', None)
+    if fields is None:
+        return layer.get_field(name) is not None
+    prefix = layer.layer_name
+    keys = (f'{prefix}_{prefix}_{name}', f'{prefix}_{name}')
+    # Expert flags in EK have a null value and live in nested expert records.
+    pending = fields[:] if isinstance(fields, list) else [fields]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, dict):
+            if any(key in node for key in keys):
+                return True
+            expert = node.get('_ws_expert')
+            if expert is not None:
+                pending.extend(expert if isinstance(expert, list) else [expert])
+    return False
+
+
+def _number(value, default=None):
+    if str(value).lower() in ('true', 'false'):
+        return int(str(value).lower() == 'true')
+    try:
+        return int(value, 0)
+    except (ValueError, TypeError):
+        try:
+            return int(float(value))
+        except (ValueError, TypeError):
+            return default
+
+
+def _merge(target, values):
+    target.update({key: value for key, value in values.items() if value is not None})
+
+
+def _application_fields(packet, flow, payload_length):
+    dns = _layer(packet, 'dns')
+    if dns is not None:
+        current = flow['dns'] or {}
+        response = _number(_value(dns, 'flags_response'), 0) == 1
+        qtype = _number(_value(dns, 'qry_type'))
+        _merge(current, {'queryName': _value(dns, 'qry_name'),
+                         'queryType': DNS_TYPES.get(qtype, f'TYPE{qtype}') if qtype else None})
+        if response or not flow['dns']:
+            rcode = _number(_value(dns, 'flags_rcode'), 0)
+            _merge(current, {'rcode': DNS_RCODES.get(rcode, f'RCODE{rcode}'),
+                             'answerCount': _number(_value(dns, 'count_answers'), 0),
+                             'answerIps': list(dict.fromkeys(_values(dns, 'a') + _values(dns, 'aaaa'))),
+                             'ttl': _number(_value(dns, 'resp_ttl')),
+                             'responseSize': payload_length if response else 0, 'isResponse': response})
+        flow['dns'] = current
+    http = _layer(packet, 'http')
+    if http is not None:
+        current = flow['http'] or {}
+        _merge(current, {'method': _value(http, 'request_method'), 'host': _value(http, 'host'),
+                         'uri': _value(http, 'request_uri'), 'userAgent': _value(http, 'user_agent'),
+                         'status': _number(_value(http, 'response_code')),
+                         'version': _value(http, 'request_version', 'response_version'),
+                         'contentType': _value(http, 'content_type'),
+                         'contentLength': _number(_value(http, 'content_length')),
+                         'referer': _value(http, 'referer')})
+        flow['http'] = current
+    tls = _layer(packet, 'tls')
+    if tls is not None:
+        current = flow['tls'] or {'detected': True}
+        handshake = _number(_value(tls, 'handshake_type'))
+        version = _number(_value(tls, 'handshake_version'))
+        # A ClientHello advertises several versions; a ServerHello selects one.
+        if handshake == 2:
+            version = _number(_value(tls, 'handshake_extensions_supported_version'), version)
+        if version in TLS_VERSIONS and (handshake == 2 or not current.get('version')):
+            current['version'] = TLS_VERSIONS[version]
+        _merge(current, {'sni': _value(tls, 'handshake_extensions_server_name'),
+                         'ja3': _value(tls, 'handshake_ja3'), 'ja3s': _value(tls, 'handshake_ja3s'),
+                         'alpn': _value(tls, 'handshake_extensions_alpn_str')})
+        if handshake == 2:
+            _merge(current, {'cipherSuite': _value(tls, 'handshake_ciphersuite')})
+        flow['tls'] = current
+    names = {layer.layer_name.lower() for layer in packet.layers}
+    for name, label in [('ssh', 'SSH'), ('smb2', 'SMB'), ('smb', 'SMB'), ('ftp', 'FTP'),
+                        ('smtp', 'SMTP'), ('rdp', 'RDP'), ('telnet', 'TELNET'), ('dcerpc', 'WMI')]:
+        if name in names:
+            flow['appProtocol'] = label
+            break
+
+
+def _new_flow(src, sport, dst, dport, protocol, timestamp, network, packet):
+    eth, vlan = _layer(packet, 'eth'), _layer(packet, 'vlan')
     return {
-        "srcIp": src_ip, "srcPort": src_port, "dstIp": dst_ip, "dstPort": dst_port,
-        "protocol": proto, "startTime": t, "endTime": t, "duration": 0,
-        "startMs": ts_ms, "endMs": ts_ms,  # 内部字段：超时判定用 epoch 毫秒，避免时区歧义
-        "upPackets": 0, "downPackets": 0, "upBytes": 0, "downBytes": 0,
-        "synCount": 0, "synAckCount": 0, "ackCount": 0, "finCount": 0,
-        "rstCount": 0, "pshCount": 0, "urgCount": 0,
-        "handshakeSuccess": False, "closeReason": "TIMEOUT",
-        "initWinSize": None, "mss": None, "ttlInit": ttl, "firstUpPktLen": None,
-        "upPktLens": [], "downPktLens": [],
-        "seenSyn": False, "seenSynAck": False,
-        "dns": None, "tls": None, "http": None,
+        'srcIp': src, 'srcPort': sport, 'dstIp': dst, 'dstPort': dport, 'protocol': protocol,
+        'ipVersion': 'IPv6' if ':' in src else 'IPv4', 'vlanId': _number(_value(vlan, 'id')),
+        'srcMac': _value(eth, 'src'), 'dstMac': _value(eth, 'dst'),
+        'startTime': _time(timestamp), 'endTime': _time(timestamp), 'duration': 0,
+        '_startMs': timestamp, '_endMs': timestamp,
+        'upPackets': 0, 'downPackets': 0, 'upBytes': 0, 'downBytes': 0,
+        'synCount': 0, 'synAckCount': 0, 'ackCount': 0, 'finCount': 0,
+        'rstCount': 0, 'pshCount': 0, 'urgCount': 0, 'handshakeSuccess': False,
+        'closeReason': 'TIMEOUT', 'initWinSize': None, 'mss': None,
+        'ttlInit': _number(_value(network, 'ttl', 'hlim')), 'firstUpPktLen': None,
+        'upPktLens': [], 'downPktLens': [], '_seenSyn': False, '_seenSynAck': False,
+        'retransCount': 0, 'outOfOrderCount': 0, 'zeroWinCount': 0,
+        'dns': None, 'tls': None, 'http': None,
     }
 
 
-def parse_pcap(buf: bytes) -> dict:
-    if len(buf) < 24:
-        raise ValueError("文件太小，不是有效的 pcap 文件")
-    magic = struct.unpack_from("<I", buf, 0)[0]
-    if magic == 0xA1B2C3D4:
-        endian, ns = "<", False
-    elif magic == 0xD4C3B2A1:
-        endian, ns = ">", False
-    elif magic == 0xA1B23C4D:
-        endian, ns = "<", True
-    elif magic == 0x4D3CB2A1:
-        endian, ns = ">", True
-    elif magic == 0x0A0D0D0A:
-        raise ValueError("检测到 pcapng 格式，当前仅支持 classic pcap（可用 editcap -F pcap 转换）")
-    else:
-        raise ValueError("无法识别的文件格式，请上传 .pcap 文件")
-
-    link_type = struct.unpack_from(f"{endian}H", buf, 20)[0]
-    if link_type != 1:
-        raise ValueError(f"暂不支持链路类型 {link_type}（仅支持 Ethernet/LINKTYPE_ETHERNET）")
-
-    flows: dict[str, list[dict]] = {}
-    packets = 0
-    skipped = 0
-    off = 24
-
-    while off + 16 <= len(buf):
-        ts_sec, ts_frac, incl_len = struct.unpack_from(f"{endian}III", buf, off)
-        off += 16
-        if off + incl_len > len(buf):
-            break
-        frame = buf[off: off + incl_len]
-        off += incl_len
+def _aggregate(capture, store=None, progress=None):
+    groups, output = store if store is not None else {}, []
+    packets = skipped = 0
+    for packet in capture:
         packets += 1
-        ts_ms = ts_sec * 1000 + (ts_frac / 1e6 if ns else ts_frac / 1000)
-
-        # Ethernet（含单层 VLAN）
-        if len(frame) < 14:
+        if progress and packets % 1000 == 0:
+            progress(packets)
+        network = _layer(packet, 'ip')
+        if network is None:
+            network = _layer(packet, 'ipv6')
+        transport, protocol = _layer(packet, 'tcp'), 'TCP'
+        if transport is None:
+            transport, protocol = _layer(packet, 'udp'), 'UDP'
+        if network is None or transport is None:
             skipped += 1
             continue
-        eth_type = struct.unpack_from(">H", frame, 12)[0]
-        l3 = 14
-        if eth_type == 0x8100 and len(frame) >= 18:
-            eth_type = struct.unpack_from(">H", frame, 16)[0]
-            l3 = 18
-        if eth_type != 0x0800:  # 仅 IPv4
+        src, dst = _value(network, 'src'), _value(network, 'dst')
+        sport, dport = _number(_value(transport, 'srcport')), _number(_value(transport, 'dstport'))
+        if not src or not dst or sport is None or dport is None:
             skipped += 1
             continue
-        if len(frame) < l3 + 20:
-            skipped += 1
-            continue
-
-        ihl = (frame[l3] & 0x0F) * 4
-        total_len = struct.unpack_from(">H", frame, l3 + 2)[0]
-        proto = frame[l3 + 9]
-        ttl = frame[l3 + 8]
-        src_ip = ip4(frame, l3 + 12)
-        dst_ip = ip4(frame, l3 + 16)
-        l4 = l3 + ihl
-        if len(frame) < l4 + 4:
-            skipped += 1
-            continue
-
-        src_port, dst_port = struct.unpack_from(">HH", frame, l4)
-
-        flags = 0
-        win_size = None
-        mss = None
-        payload_off = l4 + 8
-        if proto == 6:  # TCP
-            if len(frame) < l4 + 20:
-                skipped += 1
-                continue
-            data_off = ((frame[l4 + 12] >> 4) & 0x0F) * 4
-            flags = frame[l4 + 13]
-            win_size = struct.unpack_from(">H", frame, l4 + 14)[0]
-            payload_off = l4 + data_off
-            # TCP 选项中的 MSS
-            if (flags & 0x02) and data_off > 20:
-                op = l4 + 20
-                op_end = l4 + data_off
-                while op < op_end:
-                    kind = frame[op]
-                    if kind == 0:
-                        break
-                    if kind == 1:
-                        op += 1
-                        continue
-                    olen = frame[op + 1]
-                    if kind == 2 and olen == 4:
-                        mss = struct.unpack_from(">H", frame, op + 2)[0]
-                    op += olen or 1
-        elif proto != 17:  # 仅 TCP/UDP
-            skipped += 1
-            continue
-
-        proto_name = "TCP" if proto == 6 else "UDP"
-        payload_len = max(0, min(total_len, len(frame) - l3) - (payload_off - l3))
-        payload = frame[payload_off: min(len(frame), payload_off + payload_len)]
-
-        # 会话化：首包方向为上行；同五元组超非活跃超时则切分为新会话
-        fwd = _flow_key(src_ip, src_port, dst_ip, dst_port, proto_name)
-        rev = _flow_key(dst_ip, dst_port, src_ip, src_port, proto_name)
-        up = True
-        lst = flows.get(fwd)
-        if lst is None:
-            lst = flows.get(rev)
-            up = False
-        f = lst[-1] if lst else None
-        if f and ts_ms - f["endMs"] > INACTIVE_TIMEOUT_MS:
-            f = None  # 超时切分
-        if f is None:
-            # 方向继承：已有同五元组流则沿用其方向，否则以当前包为上行
-            anchor = lst[0] if lst else None
-            f_src_ip = anchor["srcIp"] if anchor else src_ip
-            f_src_port = anchor["srcPort"] if anchor else src_port
-            f_dst_ip = anchor["dstIp"] if anchor else dst_ip
-            f_dst_port = anchor["dstPort"] if anchor else dst_port
-            up = (src_ip == anchor["srcIp"] and src_port == anchor["srcPort"]) if anchor else True
-            f = _new_flow(f_src_ip, f_src_port, f_dst_ip, f_dst_port, proto_name, ts_ms, ttl)
-            key = fwd if up else rev
-            flows.setdefault(key, []).append(f)
-
-        f["endTime"] = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).replace(tzinfo=None)
-        f["endMs"] = ts_ms
-        if up:
-            f["upPackets"] += 1
-            f["upBytes"] += payload_len
-            if len(f["upPktLens"]) < 512:
-                f["upPktLens"].append(payload_len)
-            if f["firstUpPktLen"] is None and payload_len > 0:
-                f["firstUpPktLen"] = payload_len
-        else:
-            f["downPackets"] += 1
-            f["downBytes"] += payload_len
-            if len(f["downPktLens"]) < 512:
-                f["downPktLens"].append(payload_len)
-
-        if proto == 6:
-            syn = (flags & 0x02) != 0
-            ack = (flags & 0x10) != 0
+        raw_timestamp = packet.sniff_timestamp
+        try:
+            timestamp = float(raw_timestamp) * 1000
+        except ValueError:
+            # Older TShark EK output uses ISO 8601 rather than epoch seconds.
+            timestamp = datetime.fromisoformat(raw_timestamp.replace('Z', '+00:00')).timestamp() * 1000
+        key = (protocol, tuple(sorted(((src, sport), (dst, dport)))), _value(transport, 'stream'))
+        flow = groups.get(key)
+        # Merged captures may jump backwards by months on the same UDP stream.
+        # Only tolerate reordering within the inactivity window on either side.
+        if (flow is None or timestamp - flow['_endMs'] > INACTIVE_TIMEOUT_MS
+                or flow['_startMs'] - timestamp > INACTIVE_TIMEOUT_MS):
+            anchor = (flow[k] for k in ('srcIp', 'srcPort', 'dstIp', 'dstPort')) if flow else (src, sport, dst, dport)
+            flow = _new_flow(*anchor, protocol, timestamp, network, packet)
+            groups[key] = flow
+            if store is None:
+                output.append(flow)
+        up = src == flow['srcIp'] and sport == flow['srcPort']
+        direction = 'up' if up else 'down'
+        payload_length = (_number(_value(transport, 'len'), 0) if protocol == 'TCP'
+                          else max(0, _number(_value(transport, 'length'), 8) - 8))
+        flow[direction + 'Packets'] += 1
+        flow[direction + 'Bytes'] += payload_length
+        if len(flow[direction + 'PktLens']) < 512:
+            flow[direction + 'PktLens'].append(payload_length)
+        if up and flow['firstUpPktLen'] is None and payload_length:
+            flow['firstUpPktLen'] = payload_length
+        flow['_startMs'] = min(flow['_startMs'], timestamp)
+        flow['_endMs'] = max(flow['_endMs'], timestamp)
+        if protocol == 'TCP':
+            flags = _number(_value(transport, 'flags'), 0)
+            syn, ack = bool(flags & 2), bool(flags & 16)
             if syn and not ack:
-                f["synCount"] += 1
+                flow['synCount'] += 1
                 if up:
-                    f["seenSyn"] = True
-                    f["initWinSize"] = win_size
-                    f["mss"] = mss
+                    flow['_seenSyn'] = True
+                    flow['initWinSize'] = _number(_value(transport, 'window_size_value'))
+                    flow['mss'] = _number(_value(transport, 'options_mss_val'))
             if syn and ack:
-                f["synAckCount"] += 1
+                flow['synAckCount'] += 1
                 if not up:
-                    f["seenSynAck"] = True
+                    flow['_seenSynAck'] = True
             if ack and not syn:
-                f["ackCount"] += 1
-            if flags & 0x01:
-                f["finCount"] += 1
-                f["closeReason"] = "FIN"
-            if flags & 0x04:
-                f["rstCount"] += 1
-                f["closeReason"] = "RST"
-            if flags & 0x08:
-                f["pshCount"] += 1
-            if flags & 0x20:
-                f["urgCount"] += 1
-            if f["seenSyn"] and f["seenSynAck"]:
-                f["handshakeSuccess"] = True
+                flow['ackCount'] += 1
+            for mask, field in [(1, 'finCount'), (4, 'rstCount'), (8, 'pshCount'), (32, 'urgCount')]:
+                if flags & mask:
+                    flow[field] += 1
+            if flags & 4:
+                flow['closeReason'] = 'RST'
+            elif flags & 1 and flow['closeReason'] != 'RST':
+                flow['closeReason'] = 'FIN'
+            flow['handshakeSuccess'] = flow['_seenSyn'] and flow['_seenSynAck']
+            if any(_has_field(transport, name) for name in
+                   ('analysis_retransmission', 'analysis_fast_retransmission', 'analysis_spurious_retransmission')):
+                flow['retransCount'] += 1
+            if _has_field(transport, 'analysis_out_of_order'):
+                flow['outOfOrderCount'] += 1
+            if _has_field(transport, 'analysis_zero_window'):
+                flow['zeroWinCount'] += 1
+        _application_fields(packet, flow, payload_length)
+    if store is not None:
+        return {'flows': (_finalize_flow(f) for f in store.iter_flows()), 'flowCount': store.count,
+                'packets': packets, 'skipped': skipped}
+    return {'flows': [_finalize_flow(f) for f in output], 'packets': packets, 'skipped': skipped}
 
-        # 应用层解析（每流只抓首次命中）
-        if f["dns"] is None and (src_port == 53 or dst_port == 53) and len(payload) > 12:
-            d = _parse_dns(payload)
-            if d:
-                f["dns"] = d
-        if f["tls"] is None and len(payload) > 9 and payload[0] == 0x16:
-            t = _parse_tls_client_hello(payload)
-            if t and (t["sni"] or t["version"]):
-                f["tls"] = t
-        if f["http"] is None and len(payload) > 16:
-            h = _parse_http(payload)
-            if h:
-                f["http"] = h
 
-    out = []
-    for lst in flows.values():
-        for f in lst:
-            f["duration"] = max(0, int(f["endMs"] - f["startMs"]))
-            del f["startMs"], f["endMs"]
-            out.append(f)
-    return {"flows": out, "packets": packets, "skipped": skipped}
+def _finalize_flow(flow):
+    flow['startTime'], flow['endTime'] = _time(flow['_startMs']), _time(flow['_endMs'])
+    flow['duration'] = max(0, round(flow['_endMs'] - flow['_startMs']))
+    for key in [key for key in flow if key.startswith('_')]:
+        del flow[key]
+    return flow
+
+
+async def _close_failed_capture(capture):
+    # PyShark 0.6 aborts cleanup on a failed TShark exit, leaving its destructor
+    # to access a closed event loop. Reap every process before releasing ours.
+    for process in tuple(capture._running_processes):
+        if process.returncode is None:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+        await process.wait()
+    capture._running_processes.clear()
+    await asyncio.gather(*capture._stderr_handling_tasks, return_exceptions=True)
+
+
+def validate_capture_header(buf: bytes):
+    if len(buf) < 24:
+        raise ValueError('文件太小，不是有效的 pcap/pcapng 文件')
+    if buf[:4] not in (b'\xd4\xc3\xb2\xa1', b'\xa1\xb2\xc3\xd4', b'\x4d\x3c\xb2\xa1',
+                       b'\xa1\xb2\x3c\x4d', b'\x0a\x0d\x0d\x0a'):
+        raise ValueError('无法识别的文件格式，请上传 pcap/pcapng 文件')
+
+
+@contextmanager
+def _normalized_capture(source):
+    """Repair overflowing classic-PCAP subsecond values in a temporary copy.
+
+    Some exporters store negative microseconds as uint32 or omit carrying
+    whole seconds. TShark versions render these invalid epochs differently.
+    Interpret wrapped values as signed offsets, then carry into seconds;
+    never alter the original upload or any packet bytes.
+    """
+    repaired = source.with_suffix('.timestamps.pcap')
+    count, output = 0, None
+    try:
+        with source.open('rb') as stream:
+            header = stream.read(24)
+            formats = {b'\xd4\xc3\xb2\xa1': ('<', 1_000_000),
+                       b'\xa1\xb2\xc3\xd4': ('>', 1_000_000),
+                       b'\x4d\x3c\xb2\xa1': ('<', 1_000_000_000),
+                       b'\xa1\xb2\x3c\x4d': ('>', 1_000_000_000)}
+            if header[:4] not in formats:
+                yield source, 0
+                return
+            endian, scale = formats[header[:4]]
+            size = source.stat().st_size
+            while raw := stream.read(16):
+                if len(raw) != 16:
+                    raise ValueError('抓包文件包含不完整的报文头')
+                seconds, fraction, captured, original = struct.unpack(endian + 'IIII', raw)
+                if captured > size - stream.tell():
+                    raise ValueError('抓包文件包含不完整的报文内容')
+                if fraction >= scale:
+                    if output is None:
+                        repaired.unlink(missing_ok=True)
+                        output = repaired.open('xb')
+                        repaired.chmod(0o600)
+                        prefix = stream.tell() - 16
+                        stream.seek(0)
+                        while prefix:
+                            chunk = stream.read(min(prefix, 1024 * 1024))
+                            output.write(chunk)
+                            prefix -= len(chunk)
+                        stream.seek(16, 1)
+                    offset = fraction if fraction < 0x80000000 else fraction - 0x100000000
+                    carry, fraction = divmod(offset, scale)
+                    seconds += carry
+                    if not 0 <= seconds <= 0xffffffff:
+                        raise ValueError('抓包时间戳溢出，无法规范化')
+                    raw = struct.pack(endian + 'IIII', seconds, fraction, captured, original)
+                    count += 1
+                if output is None:
+                    stream.seek(captured, 1)
+                else:
+                    output.write(raw)
+                    remaining = captured
+                    while remaining:
+                        chunk = stream.read(min(remaining, 1024 * 1024))
+                        output.write(chunk)
+                        remaining -= len(chunk)
+        if output is not None:
+            output.close()
+        yield repaired if count else source, count
+    finally:
+        if output is not None:
+            output.close()
+        repaired.unlink(missing_ok=True)
+
+
+def _parse_capture(source: Path, store=None, progress=None, use_ek=True):
+    with source.open('rb') as stream:
+        validate_capture_header(stream.read(24))
+    import pyshark
+    from pyshark.capture.capture import TSharkCrashException
+    loop = asyncio.new_event_loop()
+    try:
+        capture = pyshark.FileCapture(
+            str(source), keep_packets=False, eventloop=loop, use_ek=use_ek, custom_parameters=['-n'],
+            override_prefs={'tcp.desegment_tcp_streams': 'TRUE', 'tls.desegment_ssl_records': 'TRUE',
+                            'tls.desegment_ssl_application_data': 'TRUE'})
+        try:
+            try:
+                return _aggregate(capture, store, progress)
+            finally:
+                capture.close()
+        except TSharkCrashException as error:
+            loop.run_until_complete(_close_failed_capture(capture))
+            raise ValueError('抓包文件损坏或无法被 TShark 解析') from error
+    finally:
+        loop.close()
+
+
+@contextmanager
+def parse_pcap_file(source, progress=None, cache_size=256):
+    """Do not read the upload or retain all flow state in application memory."""
+    source = Path(source)
+    scratch = source.with_suffix('.flows.sqlite')
+    scratch.unlink(missing_ok=True)
+    store = FlowStore(scratch, cache_size=cache_size)
+    try:
+        with _normalized_capture(source) as (capture_source, normalized):
+            result = _parse_capture(capture_source, store, progress)
+            result['normalizedTimestamps'] = normalized
+            yield result
+    finally:
+        store.close()
+        scratch.unlink(missing_ok=True)
+
+
+def parse_pcap(buf: bytes) -> dict:
+    """Compatibility helper for small in-memory fixtures; uploads use the file API."""
+    validate_capture_header(buf[:24])
+    with tempfile.TemporaryDirectory(prefix='melat-pcap-') as directory:
+        source = Path(directory) / 'capture.pcap'
+        source.write_bytes(buf)
+        with _normalized_capture(source) as (capture_source, normalized):
+            result = _parse_capture(capture_source)
+            result['normalizedTimestamps'] = normalized
+            return result

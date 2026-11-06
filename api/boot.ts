@@ -14,12 +14,12 @@ const ROOT = path.dirname(fileURLToPath(import.meta.url)); // dist/
 const APP = path.resolve(ROOT, "..");
 const PYLIBS = path.join(APP, "pylibs");
 const RT_PYLIBS = "/tmp/rt_pylibs";
-const INTERNAL_PORT = 8123;
+const INTERNAL_PORT = 3001;
 const PUBLIC_PORT = parseInt(process.env.PORT || "3000", 10);
-const PY_BINS = ["python3.12", "python3.13", "python3.11", "python3.10", "python3", "python"];
+const PY_BINS = [path.join(APP, ".venv", "bin", "python"), "python3.12", "python3.13", "python3.11", "python3.10", "python3", "python"];
 
 function testImports(bin: string, pythonpath: string): boolean {
-  const r = spawnSync(bin, ["-c", "import fastapi, uvicorn, pymysql"], {
+  const r = spawnSync(bin, ["-c", "import fastapi, uvicorn, pyshark"], {
     encoding: "utf8",
     env: { ...process.env, PYTHONPATH: pythonpath },
   });
@@ -45,7 +45,7 @@ function resolvePython(): { bin: string; pythonpath: string } | null {
   console.log(`[boot] vendored 依赖不匹配，尝试 pip 安装到 ${RT_PYLIBS} ...`);
   const pip = spawnSync(
     bin,
-    ["-m", "pip", "install", "--quiet", "--target", RT_PYLIBS, "--only-binary=:all:", "fastapi", "uvicorn", "PyMySQL"],
+    ["-m", "pip", "install", "--quiet", "--target", RT_PYLIBS, "--only-binary=:all:", "fastapi", "uvicorn", "pyshark==0.6"],
     { encoding: "utf8", timeout: 180_000 }
   );
   if (!pip.error && pip.status === 0 && testImports(bin, RT_PYLIBS)) {

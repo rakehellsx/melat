@@ -1,3 +1,4 @@
+import ListPagination, { usePageRows } from "@/components/ListPagination";
 import { useMemo, useState } from "react";
 import { trpc } from "@/providers/trpc";
 import { FIELD_TYPE_LABEL } from "@/lib/format";
@@ -21,6 +22,9 @@ export default function FieldCatalog() {
       .filter((c) => c.fields.length > 0);
   }, [data, active, kw]);
 
+  const fieldPage = usePageRows<any>(filtered.flatMap((c) => c.fields.map((f) => ({ ...f, categoryCode: c.code }))), `${active}:${kw}`);
+  const visibleCategories = filtered.map((c) => ({ ...c, fields: fieldPage.rows.filter((f) => f.categoryCode === c.code) })).filter((c) => c.fields.length > 0);
+
   if (!data) return <div className="py-20 text-center text-sm text-neutral-500">数据加载中…</div>;
 
   return (
@@ -32,7 +36,7 @@ export default function FieldCatalog() {
             value={kw}
             onChange={(e) => setKw(e.target.value)}
             placeholder="搜索字段名 / key / 描述…"
-            className="w-full rounded-md border bg-transparent py-2 pl-9 pr-3 text-sm outline-none placeholder:text-neutral-600 focus:border-neutral-500"
+            className="w-full rounded-md border bg-transparent py-2 pl-9 pr-3 text-sm outline-none placeholder:text-neutral-500 focus:border-neutral-500"
             style={{ borderColor: "var(--line)", background: "var(--surface)" }}
           />
         </div>
@@ -40,7 +44,7 @@ export default function FieldCatalog() {
           <button
             onClick={() => setActive("all")}
             className="rounded-md px-3 py-1.5 text-xs transition-colors"
-            style={active === "all" ? { background: "var(--mint-dim)", color: "var(--mint)" } : { color: "#9ca3af", background: "var(--surface)" }}
+            style={active === "all" ? { background: "var(--mint-dim)", color: "var(--mint)" } : { color: "#4b5563", background: "var(--surface)" }}
           >
             全部（{data.total}）
           </button>
@@ -49,7 +53,7 @@ export default function FieldCatalog() {
               key={c.code}
               onClick={() => setActive(c.code)}
               className="rounded-md px-3 py-1.5 text-xs transition-colors"
-              style={active === c.code ? { background: "var(--mint-dim)", color: "var(--mint)" } : { color: "#9ca3af", background: "var(--surface)" }}
+              style={active === c.code ? { background: "var(--mint-dim)", color: "var(--mint)" } : { color: "#4b5563", background: "var(--surface)" }}
             >
               {c.label}（{c.count}）
             </button>
@@ -58,7 +62,7 @@ export default function FieldCatalog() {
       </div>
 
       <div className="space-y-5">
-        {filtered.map((c) => (
+        {visibleCategories.map((c) => (
           <section key={c.code} className="panel overflow-hidden">
             <header className="flex items-center justify-between border-b px-5 py-3.5" style={{ borderColor: "var(--line)", background: "var(--surface-2)" }}>
               <div className="flex items-center gap-3">
@@ -83,14 +87,14 @@ export default function FieldCatalog() {
               </thead>
               <tbody>
                 {c.fields.map((f) => (
-                  <tr key={f.key} className="border-t hover:bg-white/[0.03]" style={{ borderColor: "var(--line)" }}>
+                  <tr key={f.key} className="border-t hover:bg-slate-50" style={{ borderColor: "var(--line)" }}>
                     <td className="num px-5 py-2.5 text-xs" style={{ color: "var(--mint)" }}>{f.key}</td>
-                    <td className="px-3 py-2.5 text-neutral-200">{f.label}</td>
+                    <td className="px-3 py-2.5 text-neutral-800">{f.label}</td>
                     <td className="px-3 py-2.5">
-                      <span className="rounded bg-white/5 px-1.5 py-0.5 text-[11px] text-neutral-400">{FIELD_TYPE_LABEL[f.type]}</span>
+                      <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[11px] text-neutral-600">{FIELD_TYPE_LABEL[f.type]}</span>
                     </td>
                     <td className="px-3 py-2.5 text-xs text-neutral-500">{f.unit ?? "—"}</td>
-                    <td className="px-3 py-2.5 text-xs leading-5 text-neutral-400">{f.desc}</td>
+                    <td className="px-3 py-2.5 text-xs leading-5 text-neutral-600">{f.desc}</td>
                     <td className="num px-5 py-2.5 text-xs text-neutral-500">{f.example ?? "—"}</td>
                   </tr>
                 ))}
@@ -100,6 +104,7 @@ export default function FieldCatalog() {
         ))}
         {filtered.length === 0 && <div className="py-16 text-center text-sm text-neutral-500">没有匹配的字段</div>}
       </div>
+      <ListPagination label="字段库" page={fieldPage.page} total={fieldPage.total} onPageChange={fieldPage.setPage} />
     </div>
   );
 }

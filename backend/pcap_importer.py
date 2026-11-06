@@ -20,13 +20,15 @@ def _entropy(s: str) -> float:
     return round(e, 2)
 
 
-def _infer_app_protocol(f: dict) -> str:
+def infer_app_protocol(f: dict) -> str:
     if f["dns"]:
         return "DNS"
     if f["tls"]:
         return "HTTPS"
     if f["http"]:
         return "HTTP"
+    if f.get("appProtocol"):
+        return f["appProtocol"]
     port = min(f["dstPort"], f["srcPort"])
     m = {53: "DNS", 80: "HTTP", 443: "HTTPS", 22: "SSH", 445: "SMB",
          3389: "RDP", 21: "FTP", 25: "SMTP", 23: "TELNET", 135: "WMI", 5985: "WMI"}
@@ -62,7 +64,7 @@ def _flow_to_row(f: dict, batch_tag: str) -> tuple:
     global _seq
     _seq += 1
     session_id = f"P-{batch_tag}-{str(_seq).zfill(5)}"
-    app = _infer_app_protocol(f)
+    app = infer_app_protocol(f)
     direction = _direction_of(f)
     up = _stats(f["upPktLens"])
     down = _stats(f["downPktLens"])
@@ -81,9 +83,9 @@ def _flow_to_row(f: dict, batch_tag: str) -> tuple:
         # 五元组与链路
         "sessionId": session_id, "srcIp": f["srcIp"], "srcPort": f["srcPort"],
         "dstIp": f["dstIp"], "dstPort": f["dstPort"],
-        "protocol": f["protocol"], "ipVersion": "IPv4", "vlanId": None,
+        "protocol": f["protocol"], "ipVersion": f.get("ipVersion", "IPv4"), "vlanId": f.get("vlanId"),
         "ingressIf": None, "egressIf": None, "direction": direction,
-        "srcMac": None, "dstMac": None, "sensorId": "pcap-upload",
+        "srcMac": f.get("srcMac"), "dstMac": f.get("dstMac"), "sensorId": "pcap-upload",
         # 会话流统计
         "startTime": f["startTime"].isoformat(), "endTime": f["endTime"].isoformat(),
         "duration": f["duration"], "upPackets": f["upPackets"], "downPackets": f["downPackets"],
@@ -100,7 +102,9 @@ def _flow_to_row(f: dict, batch_tag: str) -> tuple:
         "pktLenStdUp": up["std"], "pktLenStdDown": down["std"],
         "smallPktRatio": round((up["smallRatio"] * f["upPackets"] + down["smallRatio"] * f["downPackets"])
                                / max(1, f["upPackets"] + f["downPackets"]), 2),
-        "retransCount": None, "retransRatio": None, "outOfOrderCount": None, "fragCount": None,
+        "retransCount": f.get("retransCount"),
+        "retransRatio": round(f.get("retransCount", 0) / max(1, f["upPackets"] + f["downPackets"]), 4),
+        "outOfOrderCount": f.get("outOfOrderCount"), "fragCount": None,
         "payloadEntropyUp": None, "payloadEntropyDown": None, "idleTimeTotal": None,
         # TCP
         "synCount": f["synCount"], "synAckCount": f["synAckCount"], "ackCount": f["ackCount"],
@@ -109,7 +113,7 @@ def _flow_to_row(f: dict, batch_tag: str) -> tuple:
         "handshakeSuccess": f["handshakeSuccess"], "closeReason": f["closeReason"],
         "tcpState": {"FIN": "CLOSED", "RST": "RESET"}.get(f["closeReason"], "TIMEOUT"),
         "initWinSize": f["initWinSize"], "winScale": None, "mss": f["mss"],
-        "ttlInit": f["ttlInit"], "zeroWinCount": None,
+        "ttlInit": f["ttlInit"], "zeroWinCount": f.get("zeroWinCount"),
         # DNS
         "dnsQueryName": dns_name if is_dns else None,
         "dnsQueryType": dns.get("queryType") if is_dns else None,
@@ -136,18 +140,19 @@ def _flow_to_row(f: dict, batch_tag: str) -> tuple:
         "httpUriLen": len(http["uri"]) if is_http and http.get("uri") else 0,
         "httpUserAgent": http.get("userAgent") if is_http else None,
         "httpStatus": http.get("status") if is_http else None,
-        "httpContentType": None, "httpContentLen": None, "httpReferer": None, "httpCookieCount": None,
+        "httpContentType": http.get("contentType"), "httpContentLen": http.get("contentLength"),
+        "httpReferer": http.get("referer"), "httpCookieCount": None,
         "httpHasSqlPattern": bool(is_http and http.get("uri") and SQL_PATTERN.search(http["uri"])),
         "httpHasXssPattern": bool(is_http and http.get("uri") and XSS_PATTERN.search(http["uri"])),
         "httpHasPathTraversal": bool(is_http and http.get("uri") and TRAV_PATTERN.search(http["uri"])),
-        "httpAuthFailCount": None, "httpVersion": "HTTP/1.1" if is_http else None, "httpIsProxy": None,
+        "httpAuthFailCount": None, "httpVersion": http.get("version") if is_http else None, "httpIsProxy": None,
         # TLS
         "tlsVersion": tls.get("version") if is_tls else None,
         "tlsSni": tls.get("sni") if is_tls else None,
-        "tlsCipherSuite": None, "tlsJa3": None, "tlsJa3s": None,
+        "tlsCipherSuite": tls.get("cipherSuite"), "tlsJa3": tls.get("ja3"), "tlsJa3s": tls.get("ja3s"),
         "tlsCertSubject": None, "tlsCertIssuer": None, "tlsCertSelfSigned": None,
         "tlsCertValidDays": None, "tlsCertExpired": None, "tlsCertSnMatch": None,
-        "tlsAlpn": None, "tlsSessionResumed": None, "tlsWeakCipher": None,
+        "tlsAlpn": tls.get("alpn"), "tlsSessionResumed": None, "tlsWeakCipher": None,
         "tlsOldVersion": tls.get("version") in ("TLS1.0", "TLS1.1") if is_tls and tls.get("version") else None,
         "tlsClientHelloLen": None,
         "tlsServerNameLen": len(tls["sni"]) if is_tls and tls.get("sni") else None,
@@ -207,7 +212,33 @@ def import_flows(flows: list[dict], opts: dict) -> dict:
     )
     batch_tag = str(batch_id).zfill(3)
     rows = [_flow_to_row(f, batch_tag) for f in flows]
-    BATCH = 200
+    BATCH = 5000
     for i in range(0, len(rows), BATCH):
         executemany(INSERT_SQL, rows[i: i + BATCH])
     return {"batchId": batch_id, "imported": len(rows)}
+
+
+STREAM_INSERT_SQL = INSERT_SQL.replace('threat_score, meta)', 'threat_score, meta, ingest_batch_id)').replace(
+    'VALUES (' + ','.join(['%s'] * 17) + ')', 'VALUES (' + ','.join(['%s'] * 18) + ')')
+
+
+def import_flow_stream(flows, batch_id, progress=None):
+    """Bulk writes create suitably sized ClickHouse parts with bounded memory."""
+    rows, total, protocols = [], 0, {}
+    tag = str(batch_id).zfill(3)
+    for flow in flows:
+        rows.append((*_flow_to_row(flow, tag), batch_id))
+        protocol = infer_app_protocol(flow)
+        protocols[protocol] = protocols.get(protocol, 0) + 1
+        if len(rows) >= 5000:
+            executemany(STREAM_INSERT_SQL, rows)
+            total += len(rows)
+            rows.clear()
+            if progress:
+                progress(total)
+    if rows:
+        executemany(STREAM_INSERT_SQL, rows)
+        total += len(rows)
+        if progress:
+            progress(total)
+    return {'imported': total, 'protoDist': protocols}

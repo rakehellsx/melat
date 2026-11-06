@@ -1,3 +1,4 @@
+import ListPagination, { usePageRows } from "@/components/ListPagination";
 import { useState } from "react";
 import { trpc } from "@/providers/trpc";
 import { PageHeader } from "@/components/Layout";
@@ -8,7 +9,9 @@ import { toast } from "sonner";
 export default function Analysis() {
   const utils = trpc.useUtils();
   const { data } = trpc.analysis.rules.useQuery();
-  const runs = trpc.analysis.runs.useQuery();
+  const [historyPage, setHistoryPage] = useState(1);
+  const runs = trpc.analysis.runs.useQuery({ page: historyPage });
+  const rulePage = usePageRows<any>(data?.rules ?? []);
   const [running, setRunning] = useState<string | null>(null);
   const [runningAll, setRunningAll] = useState(false);
 
@@ -17,6 +20,7 @@ export default function Analysis() {
       toast.success(`分析完成：扫描 ${r.scanned} 条会话，产出 ${r.alerts} 条告警（${r.durationMs}ms）`);
       utils.analysis.rules.invalidate();
       utils.analysis.runs.invalidate();
+      setHistoryPage(1);
       utils.dashboard.overview.invalidate();
       setRunning(null);
     },
@@ -28,6 +32,7 @@ export default function Analysis() {
       toast.success(`全量分析完成：${rs.length} 个场景共产出 ${total} 条告警`);
       utils.analysis.rules.invalidate();
       utils.analysis.runs.invalidate();
+      setHistoryPage(1);
       utils.dashboard.overview.invalidate();
       setRunningAll(false);
     },
@@ -41,14 +46,14 @@ export default function Analysis() {
   return (
     <div>
       <PageHeader
-        title="行为关联分析"
+        title="关联分析"
         en="BEHAVIOR CORRELATION"
         desc={`${data.rules.length} 个关联分析场景，基于会话元数据做跨会话聚合、周期性与基线计算`}
         extra={
           <button
             onClick={() => { setRunningAll(true); runAll.mutate(); }}
             disabled={runningAll || running !== null}
-            className="flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium text-black transition-opacity disabled:opacity-50"
+            className="flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium text-white transition-opacity disabled:opacity-50"
             style={{ background: "var(--mint)" }}
           >
             <Zap className="h-4 w-4" />
@@ -59,7 +64,8 @@ export default function Analysis() {
 
       <div className="space-y-8">
         {cats.map(([code, meta]) => {
-          const rules = data.rules.filter((r) => r.category === code);
+          const rules = rulePage.rows.filter((r) => r.category === code);
+          if (!rules.length) return null;
           return (
             <section key={code}>
               <div className="mb-3 flex items-baseline gap-3">
@@ -80,7 +86,7 @@ export default function Analysis() {
                             <span className="font-display text-sm font-semibold">{r.name}</span>
                             <span className="rounded px-1.5 py-0.5 text-[10px] font-medium" style={{ background: sev?.bg, color: sev?.color }}>{sev?.label}</span>
                           </div>
-                          <div className="num mt-0.5 text-[11px] text-neutral-600">{r.code}</div>
+                          <div className="num mt-0.5 text-[11px] text-neutral-500">{r.code}</div>
                         </div>
                         <button
                           onClick={() => { setRunning(r.code); runOne.mutate({ ruleCode: r.code }); }}
@@ -92,17 +98,17 @@ export default function Analysis() {
                           {isRunning ? "分析中…" : "运行分析"}
                         </button>
                       </div>
-                      <p className="mt-2.5 text-xs leading-5 text-neutral-400">{r.desc}</p>
+                      <p className="mt-2.5 text-xs leading-5 text-neutral-600">{r.desc}</p>
                       <div className="mt-3 rounded-md border p-3 text-xs leading-5 text-neutral-500" style={{ borderColor: "var(--line)", background: "var(--surface-2)" }}>
                         <span className="micro-label mr-2">LOGIC</span>{r.logic}
                       </div>
                       <div className="mt-3 flex flex-wrap gap-1.5">
                         {r.fields.map((f) => (
-                          <span key={f} className="num rounded bg-white/5 px-1.5 py-0.5 text-[10px] text-neutral-400">{f}</span>
+                          <span key={f} className="num rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-neutral-600">{f}</span>
                         ))}
                       </div>
                       <div className="mt-4 flex items-center gap-4 border-t pt-3 text-[11px] text-neutral-500" style={{ borderColor: "var(--line)" }}>
-                        <span>告警 <span className="num" style={{ color: r.alertCount > 0 ? "var(--orange, #ff8c42)" : undefined }}>{r.alertCount}</span></span>
+                        <span>告警 <span className="num" style={{ color: r.alertCount > 0 ? "var(--orange, #c2410c)" : undefined }}>{r.alertCount}</span></span>
                         <span>运行 <span className="num">{r.runCount}</span> 次</span>
                         {r.lastRunAt && (
                           <span className="ml-auto flex items-center gap-1">
@@ -120,6 +126,8 @@ export default function Analysis() {
         })}
       </div>
 
+      <ListPagination label="分析规则" page={rulePage.page} total={rulePage.total} onPageChange={rulePage.setPage} />
+
       <section className="panel mt-8 p-5">
         <div className="micro-label">RUN HISTORY</div>
         <div className="mt-1 mb-3 text-sm font-medium">分析任务运行记录</div>
@@ -135,25 +143,26 @@ export default function Analysis() {
             </tr>
           </thead>
           <tbody>
-            {runs.data?.map((r) => (
+            {runs.data?.rows.map((r) => (
               <tr key={r.id} className="border-t text-xs" style={{ borderColor: "var(--line)" }}>
                 <td className="num py-2 pr-3" style={{ color: "var(--mint)" }}>{r.ruleCode}</td>
                 <td className="py-2 pr-3">
-                  <span className="rounded px-1.5 py-0.5 text-[10px]" style={{ background: r.status === "success" ? "var(--mint-dim)" : "rgba(255,68,68,0.12)", color: r.status === "success" ? "var(--mint)" : "#ff4444" }}>
+                  <span className="rounded px-1.5 py-0.5 text-[10px]" style={{ background: r.status === "success" ? "var(--mint-dim)" : "rgba(255,68,68,0.12)", color: r.status === "success" ? "var(--mint)" : "#dc2626" }}>
                     {r.status === "success" ? "成功" : r.status}
                   </span>
                 </td>
-                <td className="num py-2 pr-3 text-right text-neutral-300">{r.sessionsScanned.toLocaleString()}</td>
-                <td className="num py-2 pr-3 text-right text-neutral-300">{r.alertsGenerated}</td>
-                <td className="num py-2 pr-3 text-right text-neutral-400">{r.durationMs}ms</td>
+                <td className="num py-2 pr-3 text-right text-neutral-700">{r.sessionsScanned.toLocaleString()}</td>
+                <td className="num py-2 pr-3 text-right text-neutral-700">{r.alertsGenerated}</td>
+                <td className="num py-2 pr-3 text-right text-neutral-600">{r.durationMs}ms</td>
                 <td className="num py-2 text-right text-neutral-500">{fmtTime(r.startedAt)}</td>
               </tr>
             ))}
-            {runs.data?.length === 0 && (
+            {runs.data?.rows.length === 0 && (
               <tr><td colSpan={6} className="py-8 text-center text-xs text-neutral-500">尚未运行过分析任务</td></tr>
             )}
           </tbody>
         </table>
+        <ListPagination label="分析记录" page={historyPage} total={runs.data?.total} onPageChange={setHistoryPage} loading={runs.isFetching} />
       </section>
     </div>
   );

@@ -1,0 +1,15 @@
+[Unit]
+Description=ClickHouse 22.3.10.22 for Melat
+After=network.target
+[Service]
+Type=simple
+User=clickhouse
+Group=clickhouse
+ExecStart=/data/melat/clickhouse-22.3.10.22/usr/bin/clickhouse server --config-file=/etc/melat/clickhouse.xml
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=262144
+MemoryMax=2500M
+TimeoutStopSec=120
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,68 @@
+[
+  {
+    "id": 1,
+    "name": "单源多端口扫描识别",
+    "description": "对同一源IP按目的端口去重计数，识别端口扫描行为",
+    "severity": "high",
+    "dimensions": "[\"srcIp\"]",
+    "metrics": "[{\"agg\": \"countDistinct\", \"alias\": \"扫描端口数\", \"field\": \"dstPort\"}, {\"agg\": \"count\", \"alias\": \"会话数\", \"field\": \"*\"}]",
+    "filters": "[{\"field\": \"protocol\", \"op\": \"eq\", \"value\": \"TCP\"}]",
+    "having_def": "{\"metricIndex\": 0, \"op\": \"gte\", \"value\": 20}",
+    "created_at": "2026-09-21 13:58:00"
+  },
+  {
+    "id": 60001,
+    "name": "夜间异常外联检测",
+    "description": "夜间时段（isNight）内网主机向外发起大量会话或外发流量，识别非工作时间的异常外联行为",
+    "severity": "high",
+    "dimensions": "[\"srcIp\", \"isNight\"]",
+    "metrics": "[{\"field\": \"*\", \"agg\": \"count\", \"alias\": \"夜间会话数\"}, {\"field\": \"upBytes\", \"agg\": \"sum\", \"alias\": \"夜间外发字节\"}]",
+    "filters": "[{\"field\": \"isNight\", \"op\": \"eq\", \"value\": \"true\"}, {\"field\": \"direction\", \"op\": \"eq\", \"value\": \"内到外\"}]",
+    "having_def": "{\"metricIndex\": 0, \"op\": \"gte\", \"value\": 15}",
+    "created_at": "2026-09-23 07:37:53"
+  },
+  {
+    "id": 60002,
+    "name": "大流量数据外发识别",
+    "description": "按源-目的对聚合上行流量，单对累计外发超过 100MB 判定为疑似数据外泄",
+    "severity": "critical",
+    "dimensions": "[\"srcIp\", \"dstIp\"]",
+    "metrics": "[{\"field\": \"upBytes\", \"agg\": \"sum\", \"alias\": \"外发总量\"}, {\"field\": \"*\", \"agg\": \"count\", \"alias\": \"会话数\"}]",
+    "filters": "[{\"field\": \"direction\", \"op\": \"eq\", \"value\": \"内到外\"}]",
+    "having_def": "{\"metricIndex\": 0, \"op\": \"gte\", \"value\": 104857600}",
+    "created_at": "2026-09-23 07:37:54"
+  },
+  {
+    "id": 60003,
+    "name": "DNS 隧道可疑检测",
+    "description": "同一源 IP 解析大量唯一域名且伴随异常上行字节，识别利用 DNS 协议的隐蔽隧道通信",
+    "severity": "high",
+    "dimensions": "[\"srcIp\"]",
+    "metrics": "[{\"field\": \"dnsQueryName\", \"agg\": \"countDistinct\", \"alias\": \"唯一域名数\"}, {\"field\": \"*\", \"agg\": \"count\", \"alias\": \"DNS 查询数\"}, {\"field\": \"upBytes\", \"agg\": \"sum\", \"alias\": \"上行字节\"}]",
+    "filters": "[{\"field\": \"appProtocol\", \"op\": \"eq\", \"value\": \"DNS\"}]",
+    "having_def": "{\"metricIndex\": 0, \"op\": \"gte\", \"value\": 80}",
+    "created_at": "2026-09-23 07:37:56"
+  },
+  {
+    "id": 60004,
+    "name": "恶意声誉 IP 通信告警",
+    "description": "与威胁情报标记为「恶意」的 IP 发生 3 次以上通信即告警，并按平均威胁分排序",
+    "severity": "critical",
+    "dimensions": "[\"srcIp\", \"dstIp\"]",
+    "metrics": "[{\"field\": \"*\", \"agg\": \"count\", \"alias\": \"通信次数\"}, {\"field\": \"threatScore\", \"agg\": \"avg\", \"alias\": \"平均威胁分\"}]",
+    "filters": "[{\"field\": \"ipReputation\", \"op\": \"eq\", \"value\": \"恶意\"}]",
+    "having_def": "{\"metricIndex\": 0, \"op\": \"gte\", \"value\": 3}",
+    "created_at": "2026-09-23 07:37:57"
+  },
+  {
+    "id": 60005,
+    "name": "内网横向移动探测",
+    "description": "内到内方向上同一源主机触达大量不同内网主机，识别失陷后的横向移动行为",
+    "severity": "high",
+    "dimensions": "[\"srcIp\"]",
+    "metrics": "[{\"field\": \"dstIp\", \"agg\": \"countDistinct\", \"alias\": \"触达主机数\"}, {\"field\": \"dstPort\", \"agg\": \"countDistinct\", \"alias\": \"触达端口数\"}, {\"field\": \"*\", \"agg\": \"count\", \"alias\": \"会话数\"}]",
+    "filters": "[{\"field\": \"direction\", \"op\": \"eq\", \"value\": \"内到内\"}]",
+    "having_def": "{\"metricIndex\": 0, \"op\": \"gte\", \"value\": 15}",
+    "created_at": "2026-09-23 07:37:58"
+  }
+]

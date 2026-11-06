@@ -1,0 +1,58 @@
+{
+  "date": "2026-11-06",
+  "runtime": "native Python/systemd",
+  "clickhouseVersion": "22.3.10.22",
+  "capture": {
+    "filename": "1G测试流量.cap",
+    "sha256": "dc7458c1c9597ac90e7b6e016fdd95e52a773e9550cb2bb1af30f445416f1d3e",
+    "ok": true,
+    "batchId": 1793940540113808,
+    "sizeBytes": 1136618988,
+    "packets": 1366027,
+    "skipped": 6346,
+    "flows": 146599,
+    "normalizedTimestamps": 0,
+    "imported": 146599,
+    "protoDist": {
+      "HTTP": 3324,
+      "OTHER": 139361,
+      "SMB": 55,
+      "DNS": 608,
+      "HTTPS": 2992,
+      "FTP": 9,
+      "SSH": 89,
+      "WMI": 9,
+      "SMTP": 4,
+      "TELNET": 136,
+      "RDP": 12
+    },
+    "durationMs": 955383
+  },
+  "duration": {
+    "sessions": 146599,
+    "maxDuration": 23124858,
+    "minDuration": 0,
+    "negativeDurations": 0
+  },
+  "checks": {
+    "protocolTests": 15,
+    "clickhouseIntegrationTests": 8,
+    "modelFields": 176,
+    "analysisRules": 14,
+    "builtinModels": 6,
+    "browser": {
+      "sessions": {
+        "pageSize": 10,
+        "disjointPages": true,
+        "detail": true,
+        "crossPageDeleted": 4,
+        "allDeleted": 51
+      },
+      "alerts": {
+        "before": 2,
+        "bulkDeleted": 1,
+        "allDeleted": 1
+      }
+    }
+  }
+}
